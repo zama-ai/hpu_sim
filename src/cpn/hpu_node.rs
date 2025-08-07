@@ -106,7 +106,11 @@ impl HpuNode {
 
         // Expose some inner port
         // Use at higher level for inter-node communication
-        inner.expose_port("dma".to_string(), "dma".to_string(), "outbound".to_string());
+        inner.expose_port(
+            "dma_outbound".to_string(),
+            "dma".to_string(),
+            "outbound".to_string(),
+        );
         inner.expose_port(
             "mem".to_string(),
             "hbm".to_string(),

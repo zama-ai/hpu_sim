@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct UCoreParams {
     pub axis_depth: usize,
-    // TODO
+    pub polling_rate: unit::Time,
 }
 
 /// Store internal state of UCore module
@@ -46,7 +46,6 @@ pub struct UCore {
     inner: Mutex<UCoreInner>,
 }
 
-#[default_init]
 #[default_teardown]
 impl UCore {
     pub fn new(params: UCoreParams, props: module::Properties) -> Self {
@@ -61,6 +60,23 @@ impl UCore {
             inner: Mutex::new(UCoreInner::new()),
             params,
             props,
+        }
+    }
+
+    #[init]
+    fn _init(self: Arc<Self>) {
+        let mut prc = self.prc.lock().unwrap();
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::cpu(asc)));
+    }
+}
+
+impl UCore {
+    async fn cpu(self: Arc<Self>) {
+        loop {
+            delay::Delay::wait_for(self.params.polling_rate.into()).await;
+            println!("Ucore do some polling @{}", cur_tick());
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
 }

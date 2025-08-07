@@ -75,7 +75,7 @@ pub struct Args {
     timing_mode: time::TimingMode,
 
     /// Simulation duration [val_unit]
-    #[clap(long, value_parser, default_value = "1_us")]
+    #[clap(long, value_parser, default_value = "100_ms")]
     duration: unit::Time,
 
     /// Number of tick per second (resolution) [val_unit]
@@ -134,13 +134,16 @@ fn elaborate(
     )));
 
     // List of nodes
-    let node_params = HpuNodeParams {
+    let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {},
-        ucore: UCoreParams { axis_depth: 256 },
+        ucore: UCoreParams {
+            axis_depth: 256,
+            polling_rate: config.fpga.polling_us.us(),
+        },
         ddr: ra2m_cpn::mem::NpRamParams {
             ports: 2,
             size: 10.MB(),
-            base_addr: None,
+            base_addr: Some(0),
             latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 1.GB_s(),
             binfile: None,
@@ -148,7 +151,7 @@ fn elaborate(
         hbm: ra2m_cpn::mem::NpRamParams {
             ports: 3,
             size: 10.MB(),
-            base_addr: None,
+            base_addr: Some(0x1000000),
             latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 1.GB_s(),
             binfile: None,
@@ -160,15 +163,17 @@ fn elaborate(
             bandwidth: 1.GB_s(),
         },
         ipc: ra2m_cpn::ffi::ipc::H2sBridgeParams {
-            ipc_path: ipc_name,
+            ipc_path: "".to_string(),
             addr_range: (0, 1.GB()),
-            inflight_req: 1,
+            inflight_req: 10,
             polling_rate: config.fpga.polling_us.us(),
         },
     };
 
     for id in config.fpga.node_id.iter() {
         let name = format!("node_{id}");
+        let ipc_path = format!("{ipc_name}_node_{id}");
+        node_params.ipc.ipc_path = ipc_path;
         root.insert_module(Arc::new(HpuNode::new(
             node_params.clone(),
             root.child_properties(&name, Default::default()),
@@ -177,10 +182,10 @@ fn elaborate(
         // Attach to cluster router
         // Currently simplified version with xbar and std dma instead of custom Dma over MAC
         // Node Dma is master and Hbm is slave
-        let dma_port = format!("{name}::dma::outbound");
+        let dma_port = format!("{name}::dma_outbound");
         root.inner_bind("n2n_xbar::inbound", &dma_port)?;
 
-        let hbm_port = format!("{name}::hbm::resp_port");
+        let hbm_port = format!("{name}::mem");
         root.inner_bind("n2n_xbar::outbound", &hbm_port)?;
     }
 
@@ -188,6 +193,7 @@ fn elaborate(
 }
 
 async fn simulate(model: module::Area, args: &Args) -> Result<(), anyhow::Error> {
+    Output::init("/tmp/hpu_sim");
     // Create global simulation state and custom scheduler for hardware task
     let mut sched = init_simulation(0, args.timescale, args.timing_mode, 1024);
 
@@ -231,14 +237,14 @@ async fn hpu_sim() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-#[cfg(not(feature = "tokio-mt"))]
-#[tokio::main(worker_threads = 1)]
-async fn main() -> Result<(), anyhow::Error> {
-    println!("Use Single-threaded Tokio runtime [not feature: \"tokio-mt\"]");
-    hpu_sim().await
-}
+// #[cfg(not(feature = "tokio-mt"))]
+// #[tokio::main(worker_threads = 1)]
+// async fn main() -> Result<(), anyhow::Error> {
+//     println!("Use Single-threaded Tokio runtime [not feature: \"tokio-mt\"]");
+//     hpu_sim().await
+// }
 
-#[cfg(feature = "tokio-mt")]
+// #[cfg(feature = "tokio-mt")]
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     println!("Use multi-threaded Tokio runtime [feature: \"tokio-mt\"]");
