@@ -8,7 +8,7 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, UCoreParams};
+use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, UCoreParams, ucore::QueueProperties};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
@@ -137,8 +137,24 @@ fn elaborate(
     let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {},
         ucore: UCoreParams {
+            node_id: 0,
+            fw_pc: config.board.fw_pc,
+            ct_mem: config.board.ct_mem,
             axis_depth: 256,
             polling_rate: config.fpga.polling_us.us(),
+            iopq: QueueProperties {
+                head: 0,
+                tail: 8,
+                data: 0x10,
+                size: 256,
+            },
+
+            ackq: QueueProperties {
+                head: 0,
+                tail: 8,
+                data: 0x10,
+                size: 256,
+            },
         },
         ddr: ra2m_cpn::mem::NpRamParams {
             ports: 2,
@@ -173,6 +189,7 @@ fn elaborate(
     for id in config.fpga.node_id.iter() {
         let name = format!("node_{id}");
         let ipc_path = format!("{ipc_name}_node_{id}");
+        node_params.ucore.node_id = *id;
         node_params.ipc.ipc_path = ipc_path;
         root.insert_module(Arc::new(HpuNode::new(
             node_params.clone(),

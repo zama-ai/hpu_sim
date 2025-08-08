@@ -43,7 +43,6 @@ pub struct HpuCore {
     inner: Mutex<HpuCoreInner>,
 }
 
-#[default_init]
 #[default_teardown]
 impl HpuCore {
     pub fn new(params: HpuCoreParams, props: module::Properties) -> Self {
@@ -57,6 +56,32 @@ impl HpuCore {
             inner: Mutex::new(HpuCoreInner::new()),
             params,
             props,
+        }
+    }
+
+    #[init]
+    fn _init(self: Arc<Self>) {
+        let mut prc = self.prc.lock().unwrap();
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::loopback(asc)));
+    }
+}
+
+impl HpuCore {
+    async fn loopback(self: Arc<Self>) {
+        loop {
+            // NB: Should use the wait_pkt_ep version but DOp don't implement the RxStatus
+            let pkt = self.req.wait_pkt().await;
+            log!(|self| log::Category::Own, log::Verbosity::Info => pkt);
+
+            match pkt.payload() {
+                asm::DOp::SYNC(_dop_sync) => {
+                    // loopback DOp as ack
+                    let ack_pkt = Packet::wrap_payload(pkt.payload().clone(), Default::default());
+                    self.ack.fwd_pkt(ack_pkt).await;
+                }
+                _ => {}
+            }
         }
     }
 }
