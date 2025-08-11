@@ -74,6 +74,7 @@ impl HpuCore {
             let pkt = self.req.wait_pkt().await;
             log!(|self| log::Category::Own, log::Verbosity::Info => pkt);
 
+            println!("Received DOp {:?}", pkt.payload());
             match pkt.payload() {
                 asm::DOp::SYNC(_dop_sync) => {
                     // loopback DOp as ack

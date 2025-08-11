@@ -829,8 +829,6 @@ dependencies = [
 [[package]]
 name = "hw_regmap"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234736302d8b2dcb1ee135dc9e6b7aa5a30614162cd39c0d9483128337008c02"
 dependencies = [
  "anyhow",
  "clap",
@@ -2152,6 +2150,7 @@ dependencies = [
  "nix 0.29.0",
  "num-traits",
  "paste",
+ "ra2m",
  "rand",
  "rayon",
  "regex",

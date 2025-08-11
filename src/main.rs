@@ -8,7 +8,10 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, UCoreParams, ucore::QueueProperties};
+use hpu_sim::cpn::{
+    HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams,
+    ucore::QueueProperties,
+};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
@@ -143,23 +146,33 @@ fn elaborate(
             axis_depth: 256,
             polling_rate: config.fpga.polling_us.us(),
             iopq: QueueProperties {
-                head: 0,
-                tail: 8,
-                data: 0x10,
+                head: 0x1000000,
+                tail: 0x1000008,
+                data: 0x1000010,
                 size: 256,
             },
 
             ackq: QueueProperties {
-                head: 0,
-                tail: 8,
-                data: 0x10,
+                head: 0x1001000,
+                tail: 0x1001008,
+                data: 0x1001010,
                 size: 256,
             },
+        },
+        regmap: RegmapParams {
+            regmap_files: config
+                .fpga
+                .regmap
+                .iter()
+                .map(|path| path.expand())
+                .collect::<Vec<_>>(),
+            rtl: params.clone(),
+            latency: types::Latency::Cycle(1.cycles()),
         },
         ddr: ra2m_cpn::mem::NpRamParams {
             ports: 2,
             size: 10.MB(),
-            base_addr: Some(0),
+            base_addr: Some(0x1000000),
             latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 1.GB_s(),
             binfile: None,
@@ -167,7 +180,7 @@ fn elaborate(
         hbm: ra2m_cpn::mem::NpRamParams {
             ports: 3,
             size: 10.MB(),
-            base_addr: Some(0x1000000),
+            base_addr: Some(0x2000000),
             latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 1.GB_s(),
             binfile: None,
@@ -183,12 +196,13 @@ fn elaborate(
             addr_range: (0, 1.GB()),
             inflight_req: 10,
             polling_rate: config.fpga.polling_us.us(),
+            keep_alive: Some(250.ms()),
         },
     };
 
     for id in config.fpga.node_id.iter() {
         let name = format!("node_{id}");
-        let ipc_path = format!("{ipc_name}_node_{id}");
+        let ipc_path = format!("{ipc_name}_{id}");
         node_params.ucore.node_id = *id;
         node_params.ipc.ipc_path = ipc_path;
         root.insert_module(Arc::new(HpuNode::new(

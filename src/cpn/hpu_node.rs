@@ -20,6 +20,7 @@ use super::*;
 pub struct HpuNodeParams {
     pub hpu_core: HpuCoreParams,
     pub ucore: UCoreParams,
+    pub regmap: RegmapParams,
     pub ddr: mem::NpRamParams,
     pub hbm: mem::NpRamParams,
     pub dma: mem::DmaParams,
@@ -74,6 +75,14 @@ impl HpuNode {
         )));
         // Attach to Ddr
         inner.inner_bind("ucore::mem", "ddr::resp_port")?;
+
+        // Regmap ============================================================
+        inner.insert_module(Arc::new(Regmap::new(
+            params.regmap.clone(),
+            inner.child_properties("regmap", Default::default()),
+        )));
+        // Attach to Ddr
+        inner.inner_bind("host_xbar::outbound", "regmap::port")?;
 
         // DMA ===============================================================
         inner.insert_module(Arc::new(mem::Dma::new(

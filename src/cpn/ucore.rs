@@ -109,6 +109,9 @@ impl UCore {
 impl UCore {
     /// This function poll iopq in memory and buffered value in iop_stream
     async fn iopq_flush(self: Arc<Self>) {
+        // First of all drop the addr_range request
+        self.mem.discard_addr_range().await;
+
         let QueueProperties {
             head,
             tail,
