@@ -4,6 +4,7 @@
 
 use ra2m::prelude::{protocol::membus, *};
 use std::sync::{Arc, Mutex};
+use tfhe::core_crypto::hpu::parameters::HpuNoiseDistributionInputRaw;
 
 use hpu_regmap::FlatRegmap;
 use tfhe::tfhe_hpu_backend::interface::rtl::params::*;
@@ -422,6 +423,57 @@ impl Regmap {
             "hbm_axi4_addr_1in3::glwe_pc0_lsb" => inner.addr_ofst.lut[1],
             "hbm_axi4_addr_1in3::trc_pc0_msb" => inner.addr_ofst.trace[0],
             "hbm_axi4_addr_1in3::trc_pc0_lsb" => inner.addr_ofst.trace[1],
+
+            // sim_dummy section
+            // Used to give extra information with simulation context
+            "pbs_parameters::lwe_dimension" => self.params.rtl.pbs_params.lwe_dimension as u32,
+            "pbs_parameters::glwe_dimension" => self.params.rtl.pbs_params.glwe_dimension as u32,
+            "pbs_parameters::polynomial_size" => self.params.rtl.pbs_params.polynomial_size as u32,
+            "pbs_parameters::pbs_base_log" => self.params.rtl.pbs_params.pbs_base_log as u32,
+            "pbs_parameters::pbs_level" => self.params.rtl.pbs_params.pbs_level as u32,
+            "pbs_parameters::ks_base_log" => self.params.rtl.pbs_params.ks_base_log as u32,
+            "pbs_parameters::ks_level" => self.params.rtl.pbs_params.ks_level as u32,
+            "pbs_parameters::message_width" => self.params.rtl.pbs_params.message_width as u32,
+            "pbs_parameters::carry_width" => self.params.rtl.pbs_params.carry_width as u32,
+            "pbs_parameters::ciphertext_width" => {
+                self.params.rtl.pbs_params.ciphertext_width as u32
+            }
+            "pbs_noise_lwe::mode" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.lwe_noise_distribution,
+                )
+                .mode
+            }
+            "pbs_noise_lwe::raw_0" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.lwe_noise_distribution,
+                )
+                .raw[0]
+            }
+            "pbs_noise_lwe::raw_1" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.lwe_noise_distribution,
+                )
+                .raw[1]
+            }
+            "pbs_noise_glwe::mode" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.glwe_noise_distribution,
+                )
+                .mode
+            }
+            "pbs_noise_glwe::raw_0" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.glwe_noise_distribution,
+                )
+                .raw[0]
+            }
+            "pbs_noise_glwe::raw_1" => {
+                HpuNoiseDistributionInputRaw::from(
+                    self.params.rtl.pbs_params.glwe_noise_distribution,
+                )
+                .raw[1]
+            }
 
             _ => {
                 log!(|self| log::Category::Own, log::Verbosity::Info => register_name => "Register not hooked for reading, return 0");
