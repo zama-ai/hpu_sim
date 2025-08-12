@@ -37,7 +37,25 @@ impl HpuNode {
         // Instanciate and bind module
         let mut inner = module::Area::new(props);
 
-        // Xbar ==============================================================
+        // ===================================================================
+        // Addressable modules: Ddr/Hbm and regmap
+        // ===================================================================
+        inner.insert_module(Arc::new(mem::NpRam::new(
+            params.ddr.clone(),
+            inner.child_properties("ddr", Default::default()),
+        )));
+        inner.insert_module(Arc::new(mem::NpRam::new(
+            params.hbm.clone(),
+            inner.child_properties("hbm", Default::default()),
+        )));
+        inner.insert_module(Arc::new(Regmap::new(
+            params.regmap.clone(),
+            inner.child_properties("regmap", Default::default()),
+        )));
+
+        // ===================================================================
+        // Global interconnect
+        // ===================================================================
         inner.insert_module(Arc::new(mem::XBar::new(
             mem::XBarParams {
                 inflight_req: 10,
@@ -47,71 +65,41 @@ impl HpuNode {
                 inbound_cap: None,
                 outbound_cap: None,
             },
-            inner.child_properties("host_xbar", Default::default()),
+            inner.child_properties("xbar", Default::default()),
         )));
 
-        // DDR ===============================================================
-        inner.insert_module(Arc::new(mem::NpRam::new(
-            params.ddr.clone(),
-            inner.child_properties("ddr", Default::default()),
-        )));
+        // Attach to memories and regmap
+        inner.inner_bind("xbar::outbound", "ddr::resp_port")?;
+        inner.inner_bind("xbar::outbound", "hbm::resp_port")?;
+        inner.inner_bind("xbar::outbound", "regmap::port")?;
 
-        // Attach to Pcie Xbar
-        inner.inner_bind("host_xbar::outbound", "ddr::resp_port")?;
-
-        // HBM ===============================================================
-        inner.insert_module(Arc::new(mem::NpRam::new(
-            params.hbm.clone(),
-            inner.child_properties("hbm", Default::default()),
-        )));
-
-        // Attach to Pcie Xbar
-        inner.inner_bind("host_xbar::outbound", "hbm::resp_port")?;
-
-        // Ucore =============================================================
+        // ===================================================================
+        // Hpu inner parts
+        // ===================================================================
+        // UCore
         inner.insert_module(Arc::new(UCore::new(
             params.ucore.clone(),
             inner.child_properties("ucore", Default::default()),
         )));
-        // Attach to Ddr
-        inner.inner_bind("ucore::mem", "ddr::resp_port")?;
+        inner.inner_bind("ucore::mem", "xbar::inbound")?;
 
-        // Regmap ============================================================
-        inner.insert_module(Arc::new(Regmap::new(
-            params.regmap.clone(),
-            inner.child_properties("regmap", Default::default()),
-        )));
-        // Attach to Ddr
-        inner.inner_bind("host_xbar::outbound", "regmap::port")?;
-
-        // DMA ===============================================================
-        inner.insert_module(Arc::new(mem::Dma::new(
-            params.dma.clone(),
-            inner.child_properties("dma", Default::default()),
-        )));
-
-        // Attach to Hbm
-        inner.inner_bind("ucore::dma", "dma::inbound")?;
-
-        // HpuCore ===========================================================
+        // HpuCore
         inner.insert_module(Arc::new(HpuCore::new(
             params.hpu_core.clone(),
             inner.child_properties("hpu_core", Default::default()),
         )));
-
-        // Attach to Hbm
-        inner.inner_bind("hpu_core::mem", "hbm::resp_port")?;
+        inner.inner_bind("hpu_core::mem", "xbar::inbound")?;
         inner.inner_bind("ucore::hpu_req", "hpu_core::req")?;
         inner.inner_bind("ucore::hpu_ack", "hpu_core::ack")?;
 
-        // Host FFI ==========================================================
-        // Create Host to Sim bridge
-        inner.insert_module(Arc::new(ffi::ipc::H2sBridge::new(
-            params.ipc.clone(),
-            inner.child_properties("H2sBridge", Default::default()),
+        // ===================================================================
+        // Hpu board interface
+        // ===================================================================
+        inner.insert_module(Arc::new(mem::Dma::new(
+            params.dma.clone(),
+            inner.child_properties("dma", Default::default()),
         )));
-        // Attach to Xbar
-        inner.inner_bind("host_xbar::inbound", "H2sBridge::port")?;
+        inner.inner_bind("ucore::dma", "dma::inbound")?;
 
         // Expose some inner port
         // Use at higher level for inter-node communication
@@ -125,6 +113,17 @@ impl HpuNode {
             "hbm".to_string(),
             "resp_port".to_string(),
         );
+
+        // ===================================================================
+        // Hpu Host FFI
+        // ===================================================================
+        // Create Host to Sim bridge
+        inner.insert_module(Arc::new(ffi::ipc::H2sBridge::new(
+            params.ipc.clone(),
+            inner.child_properties("H2sBridge", Default::default()),
+        )));
+        // Attach to Xbar
+        inner.inner_bind("H2sBridge::port", "xbar::inbound")?;
 
         Ok(Self {
             params,

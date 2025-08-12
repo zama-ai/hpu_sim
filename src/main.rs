@@ -160,7 +160,7 @@ fn elaborate(
             latency: types::Latency::Cycle(1.cycles()),
         },
         ddr: ra2m_cpn::mem::NpRamParams {
-            ports: 2,
+            ports: 1,
             size: 4.GiB(),
             base_addr: Some(0x2000_0000),
             latency: types::Latency::Cycle(1.cycles()),
@@ -168,7 +168,7 @@ fn elaborate(
             binfile: None,
         },
         hbm: ra2m_cpn::mem::NpRamParams {
-            ports: 3,
+            ports: 2,
             size: 32.GiB(),
             base_addr: Some(0x40_0000_0000),
             latency: types::Latency::Cycle(1.cycles()),

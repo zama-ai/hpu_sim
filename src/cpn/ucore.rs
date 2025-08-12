@@ -98,16 +98,19 @@ impl UCore {
 impl UCore {
     /// This function poll iopq in memory and buffered value in iop_stream
     async fn iopq_flush(self: Arc<Self>) {
-        // First of all drop the addr_range request
-        self.mem.discard_addr_range().await;
-
         let QueueConfig {
             head_ofst,
             tail_ofst,
             data_ofst,
             size_w,
-            ..
+            mem,
         } = &self.params.iopq;
+        let base_addr = match mem {
+            MemKind::Ddr { offset } => offset,
+            MemKind::Hbm { pc } => {
+                panic!("Queue must be in DDR, it's currently the only way to have predictive addr")
+            }
+        };
 
         loop {
             delay::Delay::wait_for(self.params.polling_rate.into()).await;
@@ -115,7 +118,7 @@ impl UCore {
             let iop_head = {
                 let mut iop_head = 0_u32;
                 self.mem
-                    .read(self.properties(), *head_ofst, &mut iop_head)
+                    .read(self.properties(), base_addr + *head_ofst, &mut iop_head)
                     .await
                     .expect("Error while reading Iopq head");
                 iop_head
@@ -124,7 +127,7 @@ impl UCore {
             let iop_tail = {
                 let mut iop_tail = 0_u32;
                 self.mem
-                    .read(self.properties(), *tail_ofst, &mut iop_tail)
+                    .read(self.properties(), base_addr + *tail_ofst, &mut iop_tail)
                     .await
                     .expect("Error while reading Iopq head");
                 iop_tail
@@ -132,8 +135,9 @@ impl UCore {
 
             let word_avail = (iop_head - iop_tail) % *size_w as u32;
             let bytes_avail = word_avail as usize * std::mem::size_of::<u32>();
-            let chunk_start =
-                *data_ofst + ((iop_tail as usize % *size_w) * std::mem::size_of::<u32>() as usize);
+            let chunk_start = base_addr
+                + *data_ofst
+                + ((iop_tail as usize % *size_w) * std::mem::size_of::<u32>() as usize);
             if word_avail != 0 {
                 // Read body
                 let data_u8 = self
@@ -152,7 +156,7 @@ impl UCore {
 
                 // Ack for value consumption
                 self.mem
-                    .write(self.properties(), *tail_ofst, &iop_head)
+                    .write(self.properties(), base_addr + *tail_ofst, &iop_head)
                     .await
                     .expect("Error while writing Iopq tail");
             }
@@ -165,8 +169,14 @@ impl UCore {
             tail_ofst,
             data_ofst,
             size_w,
-            ..
+            mem,
         } = &self.params.ackq;
+        let base_addr = match mem {
+            MemKind::Ddr { offset } => offset,
+            MemKind::Hbm { pc } => {
+                panic!("Queue must be in DDR, it's currently the only way to have predictive addr")
+            }
+        };
 
         loop {
             // Check for room in the ack queue
@@ -174,7 +184,7 @@ impl UCore {
             let iop_head = {
                 let mut iop_head = 0_u32;
                 self.mem
-                    .read(self.properties(), *head_ofst, &mut iop_head)
+                    .read(self.properties(), base_addr + *head_ofst, &mut iop_head)
                     .await
                     .expect("Error while reading Ackq head");
                 iop_head
@@ -183,15 +193,16 @@ impl UCore {
             let iop_tail = {
                 let mut iop_tail = 0_u32;
                 self.mem
-                    .read(self.properties(), *tail_ofst, &mut iop_tail)
+                    .read(self.properties(), base_addr + *tail_ofst, &mut iop_tail)
                     .await
                     .expect("Error while reading Ackq head");
                 iop_tail
             };
 
             let word_free = *size_w as u32 - ((iop_head - iop_tail) % *size_w as u32);
-            let chunk_start =
-                *data_ofst + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>() as usize);
+            let chunk_start = base_addr
+                + *data_ofst
+                + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>() as usize);
             if word_free != 0 {
                 // NB: Should use the wait_pkt_ep version but DOp don't implement the RxStatus
                 let dop = self.hpu_ack.wait_pkt().await.unwrap_payload();
@@ -205,7 +216,7 @@ impl UCore {
 
                 // Ack for value insertion
                 self.mem
-                    .write(self.properties(), *head_ofst, &(iop_head + 1))
+                    .write(self.properties(), base_addr + *head_ofst, &(iop_head + 1))
                     .await
                     .expect("Error while writing Iopq tail");
             } else {
@@ -266,7 +277,7 @@ impl UCore {
     async fn load_fw(&self, hpu_id: u8, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
         let fw_base_addr = match self.params.fw_pc {
             // TODO swap with global addr space (i.e. all cpn behind same xbar to prevent such gym)
-            MemKind::Ddr { offset } => offset - 0x2000_0000,
+            MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
                 panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
             }
