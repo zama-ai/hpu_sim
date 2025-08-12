@@ -261,10 +261,21 @@ impl UCore {
 /// Implement a set of utility functions
 /// Mainly extracted from the mockup
 impl UCore {
+    /// Convert words offset/addr/size in bytes
+    fn words_to_bytes<W>(words: usize) -> usize {
+        words * std::mem::size_of::<W>()
+    }
+
+    /// Convert bytes offset/addr/size in words
+    fn bytes_to_words<W>(words: usize) -> usize {
+        words / std::mem::size_of::<W>()
+    }
+
     /// Read DOp stream from Firmware memory
     async fn load_fw(&self, hpu_id: u8, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
         let fw_base_addr = match self.params.fw_pc {
-            MemKind::Ddr { offset } => offset,
+            // TODO swap with global addr space (i.e. all cpn behind same xbar to prevent such gym)
+            MemKind::Ddr { offset } => offset - 0x2000_0000,
             MemKind::Hbm { .. } => {
                 panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
             }
@@ -275,10 +286,11 @@ impl UCore {
             self.mem
                 .read(
                     self.properties(),
-                    fw_base_addr + iop.fw_entry(hpu_id),
+                    fw_base_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hpu_id)),
                     &mut val,
                 )
-                .await;
+                .await
+                .expect("Error while reading Iopq body");
             val as usize
         };
         let dop_len = {
@@ -289,14 +301,19 @@ impl UCore {
                     fw_base_addr + dop_ofst as usize,
                     &mut val,
                 )
-                .await;
-            val as usize
+                .await
+                .expect("Error while reading fw");
+            Self::words_to_bytes::<u32>(val as usize)
         };
         let dop_stream_u8 = self
             .mem
-            .read_bytes(self.properties(), dop_ofst + 1, dop_len)
+            .read_bytes(
+                self.properties(),
+                fw_base_addr + dop_ofst + std::mem::size_of::<u32>(),
+                dop_len,
+            )
             .await
-            .expect("Error while reading Iopq body");
+            .expect("Error while reading fw");
         let dop_stream_u32 = bytemuck::cast_slice::<u8, u32>(&dop_stream_u8);
 
         // Parse DOp stream
@@ -392,10 +409,17 @@ impl UCore {
             .collect::<Vec<_>>();
 
         // Ucore is in charge of Sync insertion
-        // Sync on host(i.e. pos 0) -> trgt 1
-        todo!("Handle Sync insertion");
-        // dops_patch.push(hpu_asm::dop::DOpSync::new(hpu_asm::dop::HpuId(1), None).into());
-        // tracing::trace!("Patch DOp stream => {dops_patch:?}");
+        // TODO check format of inserted DOp
+        // TODO rework Ctor (split usual host sync from B2B sync ?)
+        dops_patch.push(
+            hpu_asm::dop::DOpSync::new(
+                hpu_asm::TargetId(0),
+                hpu_asm::dop::TagId(0),
+                hpu_asm::dop::IOpMode::from(0),
+            )
+            .into(),
+        );
+        log!(|self| log::Category::Own, log::Verbosity::Trace => dops_patch => "Patch DOp stream");
         dops_patch
     }
 }
