@@ -814,6 +814,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "ra2m",
+ "serde",
  "tfhe",
 ]
 

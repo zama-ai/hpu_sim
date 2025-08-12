@@ -2,8 +2,9 @@
 
 use ra2m::prelude::{protocol::membus::MemBus, *};
 
-use tfhe::tfhe_hpu_backend::asm;
+use tfhe::tfhe_hpu_backend::prelude::*;
 
+use super::DOpPayload;
 use std::sync::{Arc, Mutex};
 
 /// HpuCore parameters
@@ -34,10 +35,10 @@ pub struct HpuCore {
 
     /// req: Received DOp request
     #[port]
-    req: port::SlavePort<asm::DOp>,
+    req: port::SlavePort<DOpPayload>,
     /// outbound: Send DOp Ack
     #[port]
-    ack: port::MasterPort<asm::DOp>,
+    ack: port::MasterPort<DOpPayload>,
     prc: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     inner: Mutex<HpuCoreInner>,
@@ -71,12 +72,16 @@ impl HpuCore {
     async fn loopback(self: Arc<Self>) {
         loop {
             // NB: Should use the wait_pkt_ep version but DOp don't implement the RxStatus
-            let pkt = self.req.wait_pkt().await;
-            log!(|self| log::Category::Own, log::Verbosity::Info => pkt);
-            match pkt.payload() {
-                asm::DOp::SYNC(_dop_sync) => {
+            let dop = self
+                .req
+                .wait_pkt_ep(None)
+                .await
+                .expect("Issue with DOpPayload xfer")
+                .unwrap_payload();
+            match &dop.inner {
+                hpu_asm::DOp::SYNC(_dop_sync) => {
                     // loopback DOp as ack
-                    let ack_pkt = Packet::wrap_payload(pkt.payload().clone(), Default::default());
+                    let ack_pkt = Packet::wrap_payload(dop, Default::default());
                     self.ack.fwd_pkt(ack_pkt).await;
                 }
                 _ => {}

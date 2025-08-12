@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use super::DOpPayload;
+
 /// UCore parameters
 #[derive(Debug, Clone)]
 pub struct UCoreParams {
@@ -53,10 +55,10 @@ pub struct UCore {
     mem: port::ReqRespPort<MemBus>,
     /// Half-duplex port to issue request to Hpu
     #[port]
-    hpu_req: port::MasterPort<hpu_asm::DOp>,
+    hpu_req: port::MasterPort<DOpPayload>,
     /// Half-duplex port to received ack from Hpu
     #[port]
-    hpu_ack: port::SlavePort<hpu_asm::DOp>,
+    hpu_ack: port::SlavePort<DOpPayload>,
     /// dma: Issue Dma request for interboard communication
     #[port]
     dma: port::ReqRespPort<DmaBus>,
@@ -204,9 +206,13 @@ impl UCore {
                 + *data_ofst
                 + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>() as usize);
             if word_free != 0 {
-                // NB: Should use the wait_pkt_ep version but DOp don't implement the RxStatus
-                let dop = self.hpu_ack.wait_pkt().await.unwrap_payload();
-                let dop_hex = dop.to_hex();
+                let dop = self
+                    .hpu_ack
+                    .wait_pkt_ep(None)
+                    .await
+                    .expect("Issue with DOpPayload xfer")
+                    .unwrap_payload();
+                let dop_hex = dop.inner.to_hex();
 
                 // write body
                 self.mem
@@ -250,7 +256,7 @@ impl UCore {
                 // Wrapped DOp in packet and send them to HpuCore
                 let mut dop_pkt = dops_patched
                     .into_iter()
-                    .map(|dop| Packet::wrap_payload(dop, Default::default()))
+                    .map(|dop| Packet::wrap_payload(DOpPayload::new(dop), Default::default()))
                     .collect::<Vec<_>>();
                 self.hpu_req.fwd_pkt_burst(dop_pkt).await;
             } else {

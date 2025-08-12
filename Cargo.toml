@@ -30,3 +30,4 @@ ra2m = {path="../ra2m", features = []}
 tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 clap = { version = "=4.5.30", features = ["derive"] }
 bytemuck = "1.23.2"
+serde = { version = "1", features = ["derive"] }
