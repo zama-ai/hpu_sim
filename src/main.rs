@@ -8,10 +8,7 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use hpu_sim::cpn::{
-    HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams,
-    ucore::QueueProperties,
-};
+use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
@@ -110,8 +107,12 @@ fn elaborate(
     args: &Args,
 ) -> Result<module::Area, anyhow::Error> {
     // Some sanity check on configuration and usefull information extraction
-    let ipc_name = match &config.fpga.ffi {
-        FFIMode::Sim { ipc_name } => Ok(ipc_name.expand()),
+    let (ipc_name, iopq_config, ackq_config) = match &config.fpga.ffi {
+        FFIMode::Sim {
+            ipc_name,
+            iopq,
+            ackq,
+        } => Ok((ipc_name.expand(), iopq, ackq)),
         _ => Err(anyhow::anyhow!(
             "HpuSim only work with FFIMode::Sim. Check used configuration",
         )),
@@ -145,19 +146,8 @@ fn elaborate(
             ct_mem: config.board.ct_mem,
             axis_depth: 256,
             polling_rate: config.fpga.polling_us.us(),
-            iopq: QueueProperties {
-                head: 0x0000000,
-                tail: 0x0000008,
-                data: 0x0000010,
-                size: 256,
-            },
-
-            ackq: QueueProperties {
-                head: 0x0001000,
-                tail: 0x0001008,
-                data: 0x0001010,
-                size: 256,
-            },
+            iopq: iopq_config.clone(),
+            ackq: ackq_config.clone(),
         },
         regmap: RegmapParams {
             regmap_files: config

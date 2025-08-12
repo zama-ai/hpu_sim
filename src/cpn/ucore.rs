@@ -12,17 +12,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Queue properties
-/// Describe queue in memory. Position of head/tail and data.
-/// Word size and number of them
-#[derive(Debug, Clone)]
-pub struct QueueProperties {
-    pub head: usize,
-    pub tail: usize,
-    pub data: usize,
-    pub size: usize,
-}
-
 /// UCore parameters
 #[derive(Debug, Clone)]
 pub struct UCoreParams {
@@ -36,8 +25,8 @@ pub struct UCoreParams {
     pub axis_depth: usize,
     pub polling_rate: unit::Time,
 
-    pub iopq: QueueProperties,
-    pub ackq: QueueProperties,
+    pub iopq: QueueConfig,
+    pub ackq: QueueConfig,
 }
 
 /// Store internal state of UCore module
@@ -112,11 +101,12 @@ impl UCore {
         // First of all drop the addr_range request
         self.mem.discard_addr_range().await;
 
-        let QueueProperties {
-            head,
-            tail,
-            data,
-            size,
+        let QueueConfig {
+            head_ofst,
+            tail_ofst,
+            data_ofst,
+            size_w,
+            ..
         } = &self.params.iopq;
 
         loop {
@@ -125,7 +115,7 @@ impl UCore {
             let iop_head = {
                 let mut iop_head = 0_u32;
                 self.mem
-                    .read(self.properties(), *head, &mut iop_head)
+                    .read(self.properties(), *head_ofst, &mut iop_head)
                     .await
                     .expect("Error while reading Iopq head");
                 iop_head
@@ -134,16 +124,16 @@ impl UCore {
             let iop_tail = {
                 let mut iop_tail = 0_u32;
                 self.mem
-                    .read(self.properties(), *tail, &mut iop_tail)
+                    .read(self.properties(), *tail_ofst, &mut iop_tail)
                     .await
                     .expect("Error while reading Iopq head");
                 iop_tail
             };
 
-            let word_avail = (iop_head - iop_tail) % *size as u32;
+            let word_avail = (iop_head - iop_tail) % *size_w as u32;
             let bytes_avail = word_avail as usize * std::mem::size_of::<u32>();
             let chunk_start =
-                *data + ((iop_tail as usize % *size) * std::mem::size_of::<u32>() as usize);
+                *data_ofst + ((iop_tail as usize % *size_w) * std::mem::size_of::<u32>() as usize);
             if word_avail != 0 {
                 // Read body
                 let data_u8 = self
@@ -162,7 +152,7 @@ impl UCore {
 
                 // Ack for value consumption
                 self.mem
-                    .write(self.properties(), *tail, &iop_head)
+                    .write(self.properties(), *tail_ofst, &iop_head)
                     .await
                     .expect("Error while writing Iopq tail");
             }
@@ -170,11 +160,12 @@ impl UCore {
     }
 
     async fn ackq_flush(self: Arc<Self>) {
-        let QueueProperties {
-            head,
-            tail,
-            data,
-            size,
+        let QueueConfig {
+            head_ofst,
+            tail_ofst,
+            data_ofst,
+            size_w,
+            ..
         } = &self.params.ackq;
 
         loop {
@@ -183,7 +174,7 @@ impl UCore {
             let iop_head = {
                 let mut iop_head = 0_u32;
                 self.mem
-                    .read(self.properties(), *head, &mut iop_head)
+                    .read(self.properties(), *head_ofst, &mut iop_head)
                     .await
                     .expect("Error while reading Ackq head");
                 iop_head
@@ -192,15 +183,15 @@ impl UCore {
             let iop_tail = {
                 let mut iop_tail = 0_u32;
                 self.mem
-                    .read(self.properties(), *tail, &mut iop_tail)
+                    .read(self.properties(), *tail_ofst, &mut iop_tail)
                     .await
                     .expect("Error while reading Ackq head");
                 iop_tail
             };
 
-            let word_free = *size as u32 - ((iop_head - iop_tail) % *size as u32);
+            let word_free = *size_w as u32 - ((iop_head - iop_tail) % *size_w as u32);
             let chunk_start =
-                *data + ((iop_head as usize % *size) * std::mem::size_of::<u32>() as usize);
+                *data_ofst + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>() as usize);
             if word_free != 0 {
                 // NB: Should use the wait_pkt_ep version but DOp don't implement the RxStatus
                 let dop = self.hpu_ack.wait_pkt().await.unwrap_payload();
@@ -214,7 +205,7 @@ impl UCore {
 
                 // Ack for value insertion
                 self.mem
-                    .write(self.properties(), *head, &(iop_head + 1))
+                    .write(self.properties(), *head_ofst, &(iop_head + 1))
                     .await
                     .expect("Error while writing Iopq tail");
             } else {
