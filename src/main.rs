@@ -5,9 +5,6 @@
 //!
 //! WARN: User must start the HpuSim binary before tfhe-rs application
 
-use std::fs::OpenOptions;
-use std::path::Path;
-
 use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
@@ -124,18 +121,17 @@ fn elaborate(
     ));
 
     // Cluster level component
-    // Cluster router, currently rely on Xbar and here to mimic inter-node communication
-    root.insert_module(Arc::new(ra2m_cpn::mem::XBar::new(
-        ra2m_cpn::mem::XBarParams {
+    // Switch to properly dispatch NetworkDma request
+    let switch = Arc::new(ra2m_cpn::net::Switch::<u8, protocol::membus::MemBus>::new(
+        ra2m_cpn::net::SwitchParams {
             inflight_req: 10,
-            frontend_latency: types::Latency::Cycle(2.cycles()),
-            forward_latency: types::Latency::Cycle(1.cycles()),
+            switch_latency: types::Latency::Cycle(2.cycles()),
             bandwidth: 10.MiB_s(),
-            inbound_cap: None,
-            outbound_cap: None,
+            port_cap: None,
         },
         root.child_properties("n2n_xbar", Default::default()),
-    )));
+    ));
+    root.insert_module(switch.clone());
 
     // List of nodes
     let mut node_params = HpuNodeParams {
@@ -175,7 +171,8 @@ fn elaborate(
             bandwidth: 1.GiB_s(),
             binfile: None,
         },
-        dma: ra2m_cpn::mem::DmaParams {
+        dma: ra2m_cpn::net::NDmaParams {
+            node_id: 0,
             inflight_req: 4,
             frontend_latency: types::Latency::Cycle(1.cycles()),
             forward_latency: types::Latency::Cycle(1.cycles()),
@@ -194,20 +191,21 @@ fn elaborate(
         let name = format!("node_{id}");
         let ipc_path = format!("{ipc_name}_{id}");
         node_params.ucore.node_id = *id;
+        node_params.dma.node_id = *id;
         node_params.ipc.ipc_path = ipc_path;
         root.insert_module(Arc::new(HpuNode::new(
             node_params.clone(),
             root.child_properties(&name, Default::default()),
         )?));
 
-        // Attach to cluster router
-        // Currently simplified version with xbar and std dma instead of custom Dma over MAC
-        // Node Dma is master and Hbm is slave
-        let dma_port = format!("{name}::dma_outbound");
-        root.inner_bind("n2n_xbar::inbound", &dma_port)?;
-
-        let hbm_port = format!("{name}::mem");
-        root.inner_bind("n2n_xbar::outbound", &hbm_port)?;
+        // Attach to cluster Switch
+        // NB: each switch interface currently used two ports
+        let net_out = format!("{name}::net_outbound");
+        root.inner_bind("n2n_xbar::ingress", &net_out)?;
+        let net_in = format!("{name}::net_inbound");
+        root.inner_bind("n2n_xbar::egress", &net_in)?;
+        // TODO fixme port_nb must be return by bind function over PortVec
+        switch.register_port(id, *id as usize)?;
     }
 
     Ok(root)

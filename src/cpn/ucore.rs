@@ -2,7 +2,7 @@
 //! I.e. kind of embedded processor that Handle IOp/DOp translation
 
 use ra2m::prelude::{
-    protocol::{dma::DmaBus, membus::MemBus},
+    protocol::{addr::Addr, dma::DmaBus, membus::MemBus},
     *,
 };
 use tfhe::tfhe_hpu_backend::{asm::ToHex, prelude::*};
@@ -61,7 +61,7 @@ pub struct UCore {
     hpu_ack: port::SlavePort<DOpPayload>,
     /// dma: Issue Dma request for interboard communication
     #[port]
-    dma: port::ReqRespPort<DmaBus>,
+    dma: port::ReqRespPort<DmaBus<(u8, Addr)>>,
 
     prc: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     inner: Mutex<UCoreInner>,
@@ -109,7 +109,7 @@ impl UCore {
         } = &self.params.iopq;
         let base_addr = match mem {
             MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { pc } => {
+            MemKind::Hbm { .. } => {
                 panic!("Queue must be in DDR, it's currently the only way to have predictive addr")
             }
         };
@@ -254,7 +254,7 @@ impl UCore {
                 let dops_patched = self.patch_fw(self.params.node_id, &iop, &dops);
 
                 // Wrapped DOp in packet and send them to HpuCore
-                let mut dop_pkt = dops_patched
+                let dop_pkt = dops_patched
                     .into_iter()
                     .map(|dop| Packet::wrap_payload(DOpPayload::new(dop), Default::default()))
                     .collect::<Vec<_>>();

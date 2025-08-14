@@ -4,14 +4,14 @@
 //! * Memory (DDR/Hbm)
 //! * Ucore
 //! * HpuCore (i.e isc + Pe)
-//! * InterBoard interface
+//! * InterBoard interface (NetworkDma)
 //! * Host interface
 //!
 //! No custom logic inside HpuNode, it's only a think wrapper around inner modules.
 
 use ra2m::prelude::anyhow::Error;
 use ra2m::prelude::*;
-use ra2m::ra2m_cpn::{ffi, mem};
+use ra2m::ra2m_cpn::{ffi, mem, net};
 
 use super::*;
 
@@ -23,7 +23,7 @@ pub struct HpuNodeParams {
     pub regmap: RegmapParams,
     pub ddr: mem::NpRamParams,
     pub hbm: mem::NpRamParams,
-    pub dma: mem::DmaParams,
+    pub dma: net::NDmaParams<u8>,
     pub ipc: ffi::ipc::H2sBridgeParams,
 }
 
@@ -95,23 +95,24 @@ impl HpuNode {
         // ===================================================================
         // Hpu board interface
         // ===================================================================
-        inner.insert_module(Arc::new(mem::Dma::new(
+        inner.insert_module(Arc::new(net::NDma::new(
             params.dma.clone(),
-            inner.child_properties("dma", Default::default()),
+            inner.child_properties("ndma", Default::default()),
         )));
-        inner.inner_bind("ucore::dma", "dma::inbound")?;
+        inner.inner_bind("ucore::dma", "ndma::inbound")?;
+        inner.inner_bind("ndma::mem", "xbar::inbound")?;
 
         // Expose some inner port
         // Use at higher level for inter-node communication
         inner.expose_port(
-            "dma_outbound".to_string(),
-            "dma".to_string(),
-            "outbound".to_string(),
+            "net_inbound".to_string(),
+            "ndma".to_string(),
+            "net_inbound".to_string(),
         );
         inner.expose_port(
-            "mem".to_string(),
-            "hbm".to_string(),
-            "resp_port".to_string(),
+            "net_outbound".to_string(),
+            "ndma".to_string(),
+            "net_outbound".to_string(),
         );
 
         // ===================================================================

@@ -2,7 +2,14 @@
 //!
 //! Only implement the configuration part, no runtime register modelized
 
-use ra2m::prelude::{protocol::membus, *};
+use ra2m::prelude::{
+    protocol::{
+        Mode,
+        addr::{Addr, Pattern, SubRangeAddr},
+        membus,
+    },
+    *,
+};
 use std::sync::{Arc, Mutex};
 use tfhe::core_crypto::hpu::parameters::HpuNoiseDistributionInputRaw;
 
@@ -78,14 +85,12 @@ impl Regmap {
 
         // Notify register map addr_range
         let asc = self.clone();
-        let addr_range = vec![membus::Addr::Range(
+        let addr_range = vec![Addr::Range(
             *self.regmap.offset(),
             self.regmap.range().Byte(),
         )];
         prc.push(spawn_prc!(async {
-            match protocol::membus::addr_range_register(asc.props.uid(), &asc.port, &addr_range)
-                .await
-            {
+            match membus::addr_range_register(asc.props.uid(), &asc.port, &addr_range).await {
                 Ok(_) => {}
                 Err(err) => {
                     log!(|asc| log::Category::Protocol, log::Verbosity::Warning => err );
@@ -116,9 +121,9 @@ impl Regmap {
 
         // Decode address
         let addr = match req.subrange_addr() {
-            membus::SubRangeAddr::Phys(t) => *t,
+            SubRangeAddr::Phys(t) => *t,
             _ => {
-                req.set_mode(membus::Mode::Error(membus::MemBusError::SubRange(
+                req.set_mode(Mode::Error(membus::MemBusError::SubRange(
                     *req.subrange_addr(),
                 )));
                 return Some(delay);
@@ -128,11 +133,9 @@ impl Regmap {
         // Decode access pattern and command
         // In case of error, set mode field accordingly
         match req.pattern() {
-            membus::Pattern::Simple(d) => {
+            Pattern::Simple(d) => {
                 if usize::from(d) != std::mem::size_of::<u32>() {
-                    req.set_mode(membus::Mode::Error(membus::MemBusError::Pattern(
-                        *req.pattern(),
-                    )));
+                    req.set_mode(Mode::Error(membus::MemBusError::Pattern(*req.pattern())));
                     return Some(delay);
                 } else {
                     match req.cmd() {
@@ -146,22 +149,20 @@ impl Regmap {
                             self.write_reg(addr as u64, val_u32);
                         }
                         _ => {
-                            req.set_mode(membus::Mode::Error(membus::MemBusError::Cmd(*req.cmd())));
+                            req.set_mode(Mode::Error(membus::MemBusError::Cmd(*req.cmd())));
                             return Some(delay);
                         }
                     };
                 }
             }
             _ => {
-                req.set_mode(membus::Mode::Error(membus::MemBusError::Pattern(
-                    *req.pattern(),
-                )));
+                req.set_mode(Mode::Error(membus::MemBusError::Pattern(*req.pattern())));
                 return Some(delay);
             }
         }
 
         // Everything goes well, set success status and return
-        req.set_mode(membus::Mode::Response);
+        req.set_mode(Mode::Response);
         Some(delay)
     }
 
