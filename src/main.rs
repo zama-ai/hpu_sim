@@ -140,6 +140,8 @@ fn elaborate(
             node_id: 0,
             fw_pc: config.board.fw_pc,
             ct_mem: config.board.ct_mem,
+            // TODO add this in config
+            ct_heap: config.board.ct_mem / 2,
             axis_depth: 256,
             polling_rate: config.fpga.polling_us.us(),
             iopq: iopq_config.clone(),
