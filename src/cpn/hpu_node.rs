@@ -114,6 +114,7 @@ impl HpuNode {
             "ndma".to_string(),
             "net_outbound".to_string(),
         );
+        inner.expose_port("ctrl".to_string(), "ucore".to_string(), "ctrl".to_string());
 
         // ===================================================================
         // Hpu Host FFI

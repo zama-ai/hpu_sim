@@ -2,10 +2,16 @@
 //! I.e. kind of embedded processor that Handle IOp/DOp translation
 
 use ra2m::prelude::{
-    protocol::{addr::Addr, dma::DmaBus, membus::MemBus},
+    protocol::{addr::Addr, dma::DmaBus, membus::MemBus, network::Network},
     *,
 };
-use tfhe::tfhe_hpu_backend::{asm::ToHex, prelude::*};
+use tfhe::tfhe_hpu_backend::{
+    asm::{
+        ToHex,
+        dop::{Opcode, PeUcoreInsn},
+    },
+    prelude::*,
+};
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -35,7 +41,7 @@ pub struct UCoreParams {
 /// Store internal state of UCore module
 struct UCoreInner {
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
-    wait_evt: HashMap<(hpu_asm::IOpId, hpu_asm::dop::TagId), hpu_asm::MemId>,
+    event_list: HashMap<(hpu_asm::IOpId, hpu_asm::dop::TagId), Event>,
     // TODO
 }
 
@@ -43,9 +49,16 @@ impl UCoreInner {
     pub fn new() -> Self {
         Self {
             iop_stream: VecDeque::new(),
-            wait_evt: HashMap::new(),
+            event_list: HashMap::new(),
         }
     }
+}
+
+/// Event states and associated data
+#[derive(Debug, Clone)]
+enum Event {
+    Received(hpu_asm::dop::UcorePayload),
+    Resolved(hpu_asm::MemId),
 }
 
 #[derive(Module)]
@@ -62,6 +75,11 @@ pub struct UCore {
     /// Half-duplex port to received ack from Hpu
     #[port]
     hpu_ack: port::SlavePort<DOpPayload>,
+
+    /// Ctrl: Issue/Received control token for interboard synchronisation
+    #[port]
+    ctrl: port::ReqRespPort<Network<u8, hpu_asm::dop::UcorePayload>>,
+
     /// dma: Issue Dma request for interboard communication
     #[port]
     dma: port::ReqRespPort<DmaBus<(u8, Addr)>>,
@@ -79,6 +97,7 @@ impl UCore {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
             hpu_req: port::MasterPort::new("hpu_req", props.clone(), Some(params.axis_depth), None),
             hpu_ack: port::SlavePort::new("hpu_ack", props.clone(), Some(params.axis_depth), None),
+            ctrl: port::ReqRespPort::new("ctrl", props.clone(), None, None),
             dma: port::ReqRespPort::new("dma", props.clone(), Some(1), None),
             prc: Mutex::new(Vec::new()),
             inner: Mutex::new(UCoreInner::new()),
@@ -96,6 +115,10 @@ impl UCore {
         prc.push(spawn_prc!(Self::hpu_feed(asc)));
         let asc = self.clone();
         prc.push(spawn_prc!(Self::ackq_flush(asc)));
+
+        // Handle sync payload
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::ctrl_flush(asc)));
     }
 }
 
@@ -251,13 +274,46 @@ impl UCore {
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
                 // Retrived DOp stream from memory
-                let dops = self.load_fw(self.params.node_id, &iop).await;
+                let dops = self.load_fw(&iop).await;
                 // handle Dop
-                self.exec_or_deferred(self.params.node_id, &iop, &dops)
+                self.clone()
+                    .exec_or_deferred(&iop, &dops)
                     .await
                     .expect("Issue with ucore exec_or_deferred");
             } else {
                 delay::Delay::wait_for(self.params.polling_rate.into()).await;
+            }
+        }
+    }
+
+    /// This function handle ctrl message and update internal table accordingly
+    async fn ctrl_flush(self: Arc<Self>) {
+        loop {
+            let ucore_pld = self
+                .ctrl
+                .rx()
+                .wait_pkt_ep(None)
+                .await
+                .expect("Issue with Ctrl xfer")
+                .inner_unwrap()
+                .unwrap_payload();
+
+            if ucore_pld.opcode.is_sync_inst() {
+                // Update inner state table
+                let mut inner = self.inner.lock().unwrap();
+                let present = inner
+                    .event_list
+                    .insert((ucore_pld.iid, ucore_pld.tag), Event::Received(ucore_pld));
+                if let Some(event) = present {
+                    panic!(
+                        "Received duplicated SYNC event @{}:{} =>{event:?}",
+                        ucore_pld.iid, ucore_pld.tag
+                    );
+                }
+                // Notify to wake up pending task
+                event::Event::triggered(&forge_event_name!(|self| "sync_evt"), None);
+            } else {
+                panic!("Invalid Opcode received in UcorePayload control endpoint {ucore_pld:?}")
             }
         }
     }
@@ -277,7 +333,9 @@ impl UCore {
     }
 
     /// Read DOp stream from Firmware memory
-    async fn load_fw(&self, hpu_id: u8, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
+    async fn load_fw(&self, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
+        let hid = self.params.node_id;
+
         let fw_base_addr = match self.params.fw_pc {
             // TODO swap with global addr space (i.e. all cpn behind same xbar to prevent such gym)
             MemKind::Ddr { offset } => offset,
@@ -291,7 +349,7 @@ impl UCore {
             self.mem
                 .read(
                     self.properties(),
-                    fw_base_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hpu_id)),
+                    fw_base_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hid)),
                     &mut val,
                 )
                 .await
@@ -331,15 +389,13 @@ impl UCore {
     /// Rtl ucore emulation
     /// Some Dop are directly executed by the ucore other one are deferred to HPU
     async fn exec_or_deferred(
-        &self,
-        hpu_id: u8,
+        self: Arc<Self>,
         iop: &hpu_asm::IOp,
         dops: &[hpu_asm::DOp],
     ) -> Result<(), anyhow::Error> {
         for dop in dops {
-            let mut dop_patch = dop.clone();
             // Execute DOp directly or [patch] & deferred to Hpu
-            let deferred_dop = match &mut dop_patch {
+            let deferred_dop = match dop {
                 // Direct execution by Ucore
                 hpu_asm::DOp::SYNC(hpu_asm::dop::DOpSync(inner)) => {
                     // Build Ucore payload based on context and current DOp
@@ -353,13 +409,12 @@ impl UCore {
                             (op.props.iid, hpu_asm::MemId::Addr(op.addr.base_cid))
                         }
                         hpu_asm::dop::UcoreAlias::Heap { bid } => {
-                            let iid = iop.dst()[0].props.iid;
                             // NB: B2B heap follow user space CT
                             // TODO: Add dedicated size for B2B_heap ?
                             let mid = hpu_asm::MemId::Addr(hpu_asm::CtId(
                                 (self.params.ct_mem - self.params.ct_heap) as u16 + bid,
                             ));
-                            (iid, mid)
+                            (iop.get_iid(), mid)
                         }
                         hpu_asm::dop::UcoreAlias::None => panic!(
                             "DOp stream must not contains Hpu vanilla SYNC. This DOp must be only added by the Ucore at the end of the stream"
@@ -376,12 +431,15 @@ impl UCore {
                         iid,
                         opcode: inner.opcode,
                     };
-                    // TODO issue payload to correct HPU
+                    self.ctrl
+                        .tx()
+                        .send_pkt(Network::new_wrapped(from_id.0, to_id.0, ucore_pld, None))
+                        .await?;
 
                     None
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(inner)) => {
-                    // Build Ucore payload based on context and current DOp
+                    // Get assaciated IOpId based on alias content
                     let iid = match inner.alias {
                         hpu_asm::dop::UcoreAlias::Src { tid, bid } => {
                             iop.src()[tid as usize].props.iid
@@ -395,19 +453,14 @@ impl UCore {
                         ),
                     };
                     let tag = inner.alias.into();
+                    self.wait(iid, tag).await;
 
-                    // Hang DOp translation until associated event is founded
-                    loop {
-                        let inner = self.inner.lock().unwrap();
-                        if inner.wait_evt.contains_key((iid, tag)) {
-                            break;
-                        } else {
-                            event::Event::wait(&forge_event_name!(|self| "sync_evt")).await;
-                        }
-                    }
                     None
                 }
                 hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(inner)) => {
+                    let mut inner = inner.clone();
+                    let iop = iop.clone();
+
                     //1.  Do virtual to physical Id mapping
                     inner.hid = iop
                         .phys_id(inner.hid)
@@ -415,67 +468,69 @@ impl UCore {
                             "Invalid IOp mapping. DOp stream contains an unavailable Hpu TargetId",
                         )
                         .into();
-                    // //2.  Do template patching
-                    // inner.slot = match inner.slot {
-                    //     hpu_asm::MemId::Heap { bid } =>
-                    //     panic!("Error: B2B couldn't use Heap template. Local Hpu hasn't access to distant Heap managament"),
-                    //     hpu_asm::MemId::Src { tid, bid } => {
-                    //         let operand = iop.src()[tid as usize];
-                    //         let tid = hpu_asm::TargetId(operand.pos.0);
-                    //         let slot = hpu_asm::MemId::Addr(hpu_asm::CtId(
-                    //             operand.base_cid.0 + bid as u16,
-                    //         ));
-                    //         (tid, slot)
-                    //     }
-                    //     hpu_asm::MemId::Dst { tid, bid } => {
-                    //         let operand = iop.dst()[tid as usize];
-                    //         let tid = hpu_asm::TargetId(operand.pos.0);
-                    //         let slot = hpu_asm::MemId::Addr(hpu_asm::CtId(
-                    //             operand.base_cid.0 + bid as u16,
-                    //         ));
-                    //         (tid, slot)
-                    //     }
-                    //     hpu_asm::MemId::Addr(ct_id) => (inner.tid, hpu_asm::MemId::Addr(ct_id)),
-                    // };
-                    //
+
+                    //2. Register background worker
+                    // This worker will wait on associated event and triggered the dma acess
+                    let asc = self.clone();
+                    spawn_prc!(Self::ld_b2b_bg(asc, iop, inner));
                     None
                 }
 
-                // Patching and deferred execution
-                // LD/ST patching
-                // Do MemId template resolution
-                hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
-                | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => {
-                    let slot = match inner.slot {
-                        hpu_asm::MemId::Heap { bid } => hpu_asm::MemId::Addr(hpu_asm::CtId(
-                            (self.params.ct_mem - 1) as u16 - bid,
-                        )),
-                        hpu_asm::MemId::Src { tid, bid } => {
-                            let operand = iop.src()[tid as usize];
-                            hpu_asm::MemId::Addr(hpu_asm::CtId(
-                                operand.addr.base_cid.0 + bid as u16,
-                            ))
+                _ => {
+                    let mut dop_patch = dop.clone();
+                    match &mut dop_patch {
+                        // Patching and deferred execution
+                        // LD/ST patching
+                        // Do MemId template resolution
+                        // Warn: With Multi-Hpu support Src/Dst could be located on another Hpu
+                        hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
+                        | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => {
+                            let slot = match inner.slot {
+                                hpu_asm::MemId::Heap { bid } => hpu_asm::MemId::Addr(
+                                    hpu_asm::CtId((self.params.ct_mem - 1) as u16 - bid),
+                                ),
+                                hpu_asm::MemId::Src { tid, bid } => {
+                                    let operand = iop.src()[tid as usize];
+                                    if operand.props.pos.0 == self.params.node_id {
+                                        // Local access -> Usual patching
+                                        hpu_asm::MemId::Addr(hpu_asm::CtId(
+                                            operand.addr.base_cid.0 + bid as u16,
+                                        ))
+                                    } else {
+                                        // Remote access
+                                        let ucore_dop = PeUcoreInsn {
+                                            alias: hpu_asm::dop::UcoreAlias::Src {
+                                                tid,
+                                                bid: Some(bid),
+                                            },
+                                            hid: operand.props.pos,
+                                            opcode: hpu_asm::dop::Opcode::LD_B2B(),
+                                        };
+                                        self.ld_b2b_bg(iop.clone(), todo!());
+                                    }
+                                }
+                                hpu_asm::MemId::Dst { tid, bid } => {
+                                    let operand = iop.dst()[tid as usize];
+                                    hpu_asm::MemId::Addr(hpu_asm::CtId(
+                                        operand.addr.base_cid.0 + bid as u16,
+                                    ))
+                                }
+                                hpu_asm::MemId::Addr(ct_id) => hpu_asm::MemId::Addr(ct_id),
+                            };
+                            Some(dop_patch)
                         }
-                        hpu_asm::MemId::Dst { tid, bid } => {
-                            let operand = iop.dst()[tid as usize];
-                            hpu_asm::MemId::Addr(hpu_asm::CtId(
-                                operand.addr.base_cid.0 + bid as u16,
-                            ))
+                        // Immediat patching
+                        hpu_asm::DOp::ADDS(hpu_asm::dop::DOpAdds(inner))
+                        | hpu_asm::DOp::SUBS(hpu_asm::dop::DOpSubs(inner))
+                        | hpu_asm::DOp::SSUB(hpu_asm::dop::DOpSsub(inner))
+                        | hpu_asm::DOp::MULS(hpu_asm::dop::DOpMuls(inner)) => {
+                            patch_imm(iop, &mut inner.msg_cst);
+                            Some(dop_patch)
                         }
-                        hpu_asm::MemId::Addr(ct_id) => hpu_asm::MemId::Addr(ct_id),
-                    };
-                    Some(dop_patch)
+                        // Deferred execution
+                        _ => Some(dop_patch),
+                    }
                 }
-                // Immediat patching
-                hpu_asm::DOp::ADDS(hpu_asm::dop::DOpAdds(inner))
-                | hpu_asm::DOp::SUBS(hpu_asm::dop::DOpSubs(inner))
-                | hpu_asm::DOp::SSUB(hpu_asm::dop::DOpSsub(inner))
-                | hpu_asm::DOp::MULS(hpu_asm::dop::DOpMuls(inner)) => {
-                    patch_imm(iop, &mut inner.msg_cst);
-                    Some(dop_patch)
-                }
-                // Deferred execution
-                _ => Some(dop_patch),
             };
 
             if let Some(dop) = deferred_dop {
@@ -495,6 +550,83 @@ impl UCore {
         let sync_dop_pkt = Packet::wrap_payload(DOpPayload::new(sync_dop), Default::default());
         self.hpu_req.send_pkt(sync_dop_pkt).await?;
         log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translate and deferred to Hpu");
+        Ok(())
+    }
+
+    /// Wait an event to be received
+    async fn wait(&self, iid: hpu_asm::IOpId, tag: hpu_asm::dop::TagId) {
+        // Hang DOp translation until associated event is founded
+        loop {
+            let wait_ready = {
+                let inner_data = self.inner.lock().unwrap();
+                inner_data.event_list.contains_key(&(iid, tag))
+            };
+
+            if wait_ready {
+                break;
+            } else {
+                event::Event::wait(&forge_event_name!(|self| "sync_evt")).await;
+            }
+        }
+    }
+
+    /// Background task to wait for Sync event and start matching DMA request
+    async fn ld_b2b_bg(
+        self: Arc<Self>,
+        iop: hpu_asm::IOp,
+        dop: PeUcoreInsn,
+    ) -> Result<(), anyhow::Error> {
+        let (iid, tag, event) = {
+            let inner = self.inner.lock().unwrap();
+
+            let (iid, tag) = match dop.alias {
+                hpu_asm::dop::UcoreAlias::Src { tid, bid } => {
+                    let op = iop.src()[tid as usize];
+                    (op.props.iid, dop.alias.into())
+                }
+                hpu_asm::dop::UcoreAlias::Dst { tid, bid } => {
+                    let op = iop.dst()[tid as usize];
+                    (op.props.iid, dop.alias.into())
+                }
+                hpu_asm::dop::UcoreAlias::Heap { bid } => (iop.get_iid(), dop.alias.into()),
+                hpu_asm::dop::UcoreAlias::None => panic!(
+                    "Couldn't load untagged value from another board. For simple \"rendez-vous\" use WAIT instead"
+                ),
+            };
+            (iid, tag, inner.event_list.get(&(iid, tag)).cloned())
+        };
+
+        loop {
+            match event {
+                Some(Event::Resolved(mid)) => {
+                    // Nothing to do, value already fetch on board
+                    break;
+                }
+                Some(Event::Received(payload)) => {
+                    // Value ready but not retrieved yet
+                    // Start B2B Dma for each ciphertext flit
+                    // TODO: Issue a dma request for each ciphertext bank
+                    // TODO: Compute correct addr/lenght
+                    let src_addr = Addr::Phys(0); // TODO must depends on payload.slot
+                    let dst_mid = hpu_asm::MemId::Heap { bid: 0 }; // TODO must depends on dop.alias
+                    let dst_addr = Addr::Phys(0); // TODO must depends on dop.alias
+                    let dma_pkt = DmaBus::new_wrapped(
+                        (payload.hid.0, src_addr),
+                        (self.params.node_id, dst_addr),
+                        protocol::addr::Pattern::Simple(10.MiB()),
+                        None,
+                    );
+                    let _ = self.dma.b_req_resp(dma_pkt).await?;
+
+                    // Update event state
+                    let mut inner = self.inner.lock().unwrap();
+                    let event = inner.event_list.get_mut(&(iid, tag)).unwrap();
+                    *event = Event::Resolved(dst_mid);
+                }
+                None => self.wait(iid, tag).await,
+            }
+        }
+
         Ok(())
     }
 }

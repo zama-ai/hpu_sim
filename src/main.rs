@@ -7,7 +7,7 @@
 
 use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams};
 use ra2m::prelude::*;
-use tfhe::tfhe_hpu_backend::prelude::*;
+use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
 
 /// Define CLI arguments
 use clap::Parser;
@@ -132,6 +132,16 @@ fn elaborate(
         root.child_properties("n2n_xbar", Default::default()),
     ));
     root.insert_module(switch.clone());
+    let ctrl_switch = Arc::new(ra2m_cpn::net::SplitSwitch::<u8, UcorePayload>::new(
+        ra2m_cpn::net::SwitchParams {
+            inflight_req: 10,
+            switch_latency: types::Latency::Cycle(2.cycles()),
+            bandwidth: 1.MiB_s(),
+            port_cap: None,
+        },
+        root.child_properties("ctrl_xbar", Default::default()),
+    ));
+    root.insert_module(ctrl_switch.clone());
 
     // List of nodes
     let mut node_params = HpuNodeParams {
@@ -208,6 +218,12 @@ fn elaborate(
         root.inner_bind("n2n_xbar::egress", &net_in)?;
         // TODO fixme port_nb must be return by bind function over PortVec
         switch.register_port(id, *id as usize)?;
+
+        // Attach to cluster CtrlSwitch
+        let ctrl = format!("{name}::ctrl");
+        root.inner_bind("ctrl_xbar::port", &ctrl)?;
+        // TODO fixme port_nb must be return by bind function over PortVec
+        ctrl_switch.register_port(id, *id as usize)?;
     }
 
     Ok(root)
