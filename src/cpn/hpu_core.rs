@@ -78,6 +78,8 @@ impl HpuCore {
                 .await
                 .expect("Issue with DOpPayload xfer")
                 .unwrap_payload();
+
+            log!(|self| log::Category::Own, log::Verbosity::Info => dop);
             match &dop.inner {
                 hpu_asm::DOp::SYNC(_dop_sync) => {
                     // loopback DOp as ack
