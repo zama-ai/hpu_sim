@@ -28,7 +28,9 @@ pub struct UCoreParams {
 
     /// Ciphertext memory
     /// Expressed the number of ciphertext slot to allocate
+    // TODO change meaning of this overall mem must be ct_mem + ct_pool + ct_heap (ATM it's ct_mem)
     pub ct_mem: usize,
+    pub ct_pool: usize,
     pub ct_heap: usize,
 
     pub axis_depth: usize,
@@ -42,6 +44,8 @@ pub struct UCoreParams {
 struct UCoreInner {
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
     event_list: HashMap<(hpu_asm::IOpId, hpu_asm::dop::UcoreAlias), Event>,
+    b2b_pool: Vec<hpu_asm::CtId>,
+    dst_stq: Vec<WrOrder>,
     // TODO
 }
 
@@ -50,8 +54,17 @@ impl UCoreInner {
         Self {
             iop_stream: VecDeque::new(),
             event_list: HashMap::new(),
+            b2b_pool: Vec::new(),
+            dst_stq: Vec::new(),
         }
     }
+}
+
+struct WrOrder {
+    iid: hpu_asm::IOpId,
+    src_addr: hpu_asm::CtId,
+    dst_hid: hpu_asm::NodeId,
+    dst_addr: hpu_asm::CtId,
 }
 
 /// Event states and associated data
@@ -93,6 +106,13 @@ impl UCore {
     pub fn new(params: UCoreParams, props: module::Properties) -> Self {
         let props = Arc::new(props);
 
+        let mut inner = UCoreInner::new();
+        // Populate b2b_pool
+        let pool_offset = (params.ct_mem - params.ct_heap);
+        for i in (0..params.ct_pool) {
+            inner.b2b_pool.push(hpu_asm::CtId((pool_offset + i) as u16));
+        }
+
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
             hpu_req: port::MasterPort::new("hpu_req", props.clone(), Some(params.axis_depth), None),
@@ -100,7 +120,7 @@ impl UCore {
             ctrl: port::ReqRespPort::new("ctrl", props.clone(), None, None),
             dma: port::ReqRespPort::new("dma", props.clone(), Some(1), None),
             prc: Mutex::new(Vec::new()),
-            inner: Mutex::new(UCoreInner::new()),
+            inner: Mutex::new(inner),
             params,
             props,
         }
@@ -238,6 +258,9 @@ impl UCore {
                     .expect("Issue with DOpPayload xfer")
                     .unwrap_payload();
                 let dop_hex = dop.inner.to_hex();
+
+                // TODO flush dst_store_queue
+                // TODO Release all associated b2b_pool slot
 
                 // write body
                 self.mem
@@ -497,9 +520,33 @@ impl UCore {
                                 }
                                 hpu_asm::MemId::Dst { tid, bid } => {
                                     let operand = iop.dst()[tid as usize];
-                                    hpu_asm::MemId::Addr(hpu_asm::CtId(
-                                        operand.addr.base_cid.0 + bid as u16,
-                                    ))
+                                    if operand.props.pos.0 == self.params.node_id {
+                                        // Local access -> Usual patching
+                                        hpu_asm::MemId::Addr(hpu_asm::CtId(
+                                            operand.addr.base_cid.0 + bid as u16,
+                                        ))
+                                    } else {
+                                        // Remote access
+                                        let mut inner = self.inner.lock().unwrap();
+
+                                        // 1. Allocate temporary value in the B2B_pool
+                                        // TODO: properly handle pool empty case
+                                        let src_addr = inner.b2b_pool.pop().unwrap();
+
+                                        // 2. Register access in the dst_write queue
+                                        // Associated Dma call are issued between:
+                                        //  * Sync received from hpu_core
+                                        //  *  Forward to host
+                                        inner.dst_stq.push(WrOrder {
+                                            iid: iop.get_iid(),
+                                            src_addr,
+                                            dst_hid: operand.props.pos,
+                                            dst_addr: hpu_asm::CtId(
+                                                operand.addr.base_cid.0 + bid as u16,
+                                            ),
+                                        });
+                                        hpu_asm::MemId::Addr(src_addr)
+                                    }
                                 }
                                 hpu_asm::MemId::Addr(ct_id) => hpu_asm::MemId::Addr(ct_id),
                             };
@@ -525,6 +572,7 @@ impl UCore {
                 self.hpu_req.send_pkt(dop_pkt).await?;
             }
         }
+
         // Ucore is in charge of Sync insertion
         // TODO check format of inserted DOp
         // TODO rework Ctor (split usual host sync from B2B sync ?)
