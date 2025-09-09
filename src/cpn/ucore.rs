@@ -41,7 +41,7 @@ pub struct UCoreParams {
 /// Store internal state of UCore module
 struct UCoreInner {
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
-    event_list: HashMap<(hpu_asm::IOpId, hpu_asm::dop::TagId), Event>,
+    event_list: HashMap<(hpu_asm::IOpId, hpu_asm::dop::UcoreAlias), Event>,
     // TODO
 }
 
@@ -410,7 +410,7 @@ impl UCore {
 
                     let ucore_pld = hpu_asm::dop::UcorePayload {
                         slot,
-                        tag: inner.alias.into(),
+                        alias: inner.alias,
                         hid: from_id,
                         iid,
                         opcode: inner.opcode,
@@ -436,8 +436,7 @@ impl UCore {
                             "DOp stream must not contains Hpu vanilla SYNC. This DOp must be only added by the Ucore at the end of the stream"
                         ),
                     };
-                    let tag = inner.alias.into();
-                    self.wait(iid, tag).await;
+                    self.wait(iid, inner.alias).await;
 
                     None
                 }
@@ -541,12 +540,12 @@ impl UCore {
     }
 
     /// Wait an event to be received
-    async fn wait(&self, iid: hpu_asm::IOpId, tag: hpu_asm::dop::TagId) {
+    async fn wait(&self, iid: hpu_asm::IOpId, alias: hpu_asm::dop::UcoreAlias) {
         // Hang DOp translation until associated event is founded
         loop {
             let wait_ready = {
                 let inner_data = self.inner.lock().unwrap();
-                inner_data.event_list.contains_key(&(iid, tag))
+                inner_data.event_list.contains_key(&(iid, alias))
             };
 
             if wait_ready {
@@ -563,27 +562,27 @@ impl UCore {
         iop: hpu_asm::IOp,
         dop: PeUcoreInsn,
     ) -> Result<hpu_asm::MemId, anyhow::Error> {
-        let (iid, tag, event) = {
-            let inner = self.inner.lock().unwrap();
-
-            let (iid, tag) = match dop.alias {
-                hpu_asm::dop::UcoreAlias::Src { tid, bid } => {
-                    let op = iop.src()[tid as usize];
-                    (op.props.iid, dop.alias.into())
-                }
-                hpu_asm::dop::UcoreAlias::Dst { tid, bid } => {
-                    let op = iop.dst()[tid as usize];
-                    (op.props.iid, dop.alias.into())
-                }
-                hpu_asm::dop::UcoreAlias::Heap { bid } => (iop.get_iid(), dop.alias.into()),
-                hpu_asm::dop::UcoreAlias::None => panic!(
-                    "Couldn't load untagged value from another board. For simple \"rendez-vous\" use WAIT instead"
-                ),
-            };
-            (iid, tag, inner.event_list.get(&(iid, tag)).cloned())
-        };
-
         loop {
+            let (iid, alias, event) = {
+                let inner = self.inner.lock().unwrap();
+
+                let (iid, alias) = match dop.alias {
+                    hpu_asm::dop::UcoreAlias::Src { tid, bid } => {
+                        let op = iop.src()[tid as usize];
+                        (op.props.iid, dop.alias)
+                    }
+                    hpu_asm::dop::UcoreAlias::Dst { tid, bid } => {
+                        let op = iop.dst()[tid as usize];
+                        (op.props.iid, dop.alias)
+                    }
+                    hpu_asm::dop::UcoreAlias::Heap { bid } => (iop.get_iid(), dop.alias),
+                    hpu_asm::dop::UcoreAlias::None => panic!(
+                        "Couldn't load untagged value from another board. For simple \"rendez-vous\" use WAIT instead"
+                    ),
+                };
+                (iid, alias, inner.event_list.get(&(iid, alias)).cloned())
+            };
+
             match event {
                 Some(Event::Resolved(mid)) => {
                     // Nothing to do, value already fetch on board
@@ -609,7 +608,7 @@ impl UCore {
 
                     // Update event state
                     let mut inner = self.inner.lock().unwrap();
-                    let event = inner.event_list.get_mut(&(iid, tag)).unwrap();
+                    let event = inner.event_list.get_mut(&(iid, alias)).unwrap();
                     *event = Event::Resolved(dst_mid);
                 }
                 None => {
@@ -629,14 +628,14 @@ impl UCore {
                         };
                         let ucore_pld = hpu_asm::dop::UcorePayload {
                             slot,
-                            tag: dop.alias.into(),
+                            alias: dop.alias,
                             hid,
                             iid,
                             opcode: hpu_asm::dop::Opcode::SYNC(),
                         };
                         self.insert_event(ucore_pld);
                     } else {
-                        self.wait(iid, tag).await
+                        self.wait(iid, dop.alias).await
                     }
                 }
             }
@@ -650,11 +649,11 @@ impl UCore {
             let mut inner = self.inner.lock().unwrap();
             let present = inner
                 .event_list
-                .insert((ucore_pld.iid, ucore_pld.tag), Event::Received(ucore_pld));
+                .insert((ucore_pld.iid, ucore_pld.alias), Event::Received(ucore_pld));
             if let Some(event) = present {
                 panic!(
                     "Received duplicated SYNC event @{}:{} =>{event:?}",
-                    ucore_pld.iid, ucore_pld.tag
+                    ucore_pld.iid, ucore_pld.alias
                 );
             }
             // Notify to wake up pending task
