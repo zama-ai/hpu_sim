@@ -149,13 +149,18 @@ fn elaborate(
         ucore: UCoreParams {
             node_id: 0,
             fw_pc: config.board.fw_pc,
-            ct_mem: config.board.ct_mem,
-            // TODO add this in config
-            ct_heap: config.board.ct_mem / 2,
+            ct_pc: config.board.ct_pc.clone(),
+            ct_user: config.board.user_size,
+            ct_b2b: config.board.b2b_size,
+            ct_heap: config.board.heap_size,
             axis_depth: 256,
             polling_rate: config.fpga.polling_us.us(),
             iopq: iopq_config.clone(),
             ackq: ackq_config.clone(),
+
+            rtl_params: params.clone(),
+            hbm_global_ofst: 0x40_0000_0000,
+            hbm_pc_ofst: 0x2000_0000,
         },
         regmap: RegmapParams {
             regmap_files: config

@@ -2,7 +2,7 @@
 //! I.e. kind of embedded processor that Handle IOp/DOp translation
 
 use ra2m::prelude::{
-    protocol::{addr::Addr, dma::DmaBus, membus::MemBus, network::Network},
+    protocol::{addr::{Addr, Pattern}, dma::DmaBus, membus::MemBus, network::Network},
     *,
 };
 use tfhe::tfhe_hpu_backend::{
@@ -28,9 +28,9 @@ pub struct UCoreParams {
 
     /// Ciphertext memory
     /// Expressed the number of ciphertext slot to allocate
-    // TODO change meaning of this overall mem must be ct_mem + ct_pool + ct_heap (ATM it's ct_mem)
-    pub ct_mem: usize,
-    pub ct_pool: usize,
+    pub ct_pc: Vec<MemKind>,
+    pub ct_user: usize,
+    pub ct_b2b: usize,
     pub ct_heap: usize,
 
     pub axis_depth: usize,
@@ -38,15 +38,23 @@ pub struct UCoreParams {
 
     pub iopq: QueueConfig,
     pub ackq: QueueConfig,
+
+    /// rtl_params for Dma xfer size computation
+    // TODO Replace this by read in regmap ?!
+    pub rtl_params: HpuParameters,
+
+    // Hbm global offset for Dma xfer addr computation
+    pub hbm_global_ofst: usize,
+    // Hbm pc offset for Dma xfer addr computation
+    pub hbm_pc_ofst: usize,
 }
 
 /// Store internal state of UCore module
 struct UCoreInner {
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
     event_list: HashMap<(hpu_asm::IOpId, hpu_asm::dop::UcoreAlias), Event>,
-    b2b_pool: Vec<hpu_asm::CtId>,
+    b2b_pool: B2bPool,
     dst_stq: Vec<WrOrder>,
-    // TODO
 }
 
 impl UCoreInner {
@@ -54,7 +62,7 @@ impl UCoreInner {
         Self {
             iop_stream: VecDeque::new(),
             event_list: HashMap::new(),
-            b2b_pool: Vec::new(),
+            b2b_pool: B2bPool::new(),
             dst_stq: Vec::new(),
         }
     }
@@ -62,9 +70,43 @@ impl UCoreInner {
 
 struct WrOrder {
     iid: hpu_asm::IOpId,
-    src_addr: hpu_asm::CtId,
+    src_cid: hpu_asm::CtId,
     dst_hid: hpu_asm::NodeId,
-    dst_addr: hpu_asm::CtId,
+    dst_cid: hpu_asm::CtId,
+}
+
+struct B2bPool {
+    free: Vec<hpu_asm::CtId>,
+    used_lifetime: HashMap<hpu_asm::IOpId, Vec<hpu_asm::CtId>>,
+}
+
+impl B2bPool {
+    fn new() -> Self {
+        Self{
+            free: Vec::new(),
+        used_lifetime: HashMap::new(),
+        }
+        }
+    fn add_slot(&mut self, slots: &[hpu_asm::CtId]) {
+        self.free.extend_from_slice(slots);
+    }
+
+    fn get_tagged(&mut self, iid: hpu_asm::IOpId) -> hpu_asm::CtId {
+        let cid = self.free.pop().expect("B2bPool is empty, check you local variable usage");
+        if let Some(vec) = self.used_lifetime.get_mut(&iid) {
+            vec.push(cid.clone());
+            } else {
+                self.used_lifetime.insert(iid, vec![cid.clone()]);
+            }
+            cid
+
+    }
+
+    fn release_tagged(&mut self, iid: hpu_asm::IOpId) {
+        if let Some(used) = self.used_lifetime.remove(&iid) {
+            self.free.extend_from_slice(&used);
+        }
+    }
 }
 
 /// Event states and associated data
@@ -108,10 +150,12 @@ impl UCore {
 
         let mut inner = UCoreInner::new();
         // Populate b2b_pool
-        let pool_offset = (params.ct_mem - params.ct_heap);
-        for i in (0..params.ct_pool) {
-            inner.b2b_pool.push(hpu_asm::CtId((pool_offset + i) as u16));
-        }
+        // Memory layout is as follow:
+        // * user [used downward]
+        // * b2b  [used downward]
+        // * heap [used upward]
+        let b2b_slot =  (0..params.ct_b2b).map(|i| hpu_asm::CtId((params.ct_user + i) as u16)).collect::<Vec<_>>();
+        inner.b2b_pool.add_slot(&b2b_slot);
 
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
@@ -259,8 +303,13 @@ impl UCore {
                     .unwrap_payload();
                 let dop_hex = dop.inner.to_hex();
 
-                // TODO flush dst_store_queue
-                // TODO Release all associated b2b_pool slot
+                // TODO Ack from Hpu must contain iid
+                // Or Ucore must store next iid to be resolved
+                let iid = hpu_asm::IOpId(1);
+                self.flush_dst_stq(iid).await;
+
+                 // Release b2b_pool slot that belong to current iop
+                 self.inner.lock().unwrap().b2b_pool.release_tagged(iid);
 
                 // write body
                 self.mem
@@ -339,12 +388,53 @@ impl UCore {
         words / std::mem::size_of::<W>()
     }
 
+    /// Utility function to patch immediat argument
+    fn patch_imm(iop: &hpu_asm::IOp, imm: &mut hpu_asm::ImmId) {
+        *imm = match imm {
+            hpu_asm::ImmId::Cst(val) => hpu_asm::ImmId::Cst(*val),
+            hpu_asm::ImmId::Var { tid, bid } => {
+                hpu_asm::ImmId::Cst(iop.imm()[*tid as usize].msg_block(*bid))
+            }
+        }
+    }
+
+    /// Utility function to convert CtId in real Addr
+    fn cid_to_addr(&self, cid: hpu_asm::CtId) -> Vec<Addr> {
+        let ct_chunk_size_b = 
+            page_align(
+                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
+                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                    * std::mem::size_of::<u64>());
+        // Ct_ofst is equal over PC
+        let ct_ofst = cid.0 as usize
+            * ct_chunk_size_b;
+
+        self.params.ct_pc.iter().map(|mem_kind| 
+            // WARN: this only work if ct_mem is allocated at begin of each channel
+            // TODO read offset from regmap register
+            
+            Addr::Phys(match mem_kind {
+                MemKind::Ddr { offset } => offset + ct_ofst,
+                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst,
+            })).collect::<Vec<_>>()
+    }
+
+    /// Utility function to get hpu ciphertext pattern for one Pc
+    fn ct_pc_pattern(&self) -> Pattern {
+        let ct_chunk_size_b = 
+            page_align(
+                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
+                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                    * std::mem::size_of::<u64>());
+
+        Pattern::Simple(ct_chunk_size_b.Byte())
+    }
+
     /// Read DOp stream from Firmware memory
     async fn load_fw(&self, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
         let hid = self.params.node_id;
 
         let fw_base_addr = match self.params.fw_pc {
-            // TODO swap with global addr space (i.e. all cpn behind same xbar to prevent such gym)
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
                 panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
@@ -416,10 +506,11 @@ impl UCore {
                             (op.props.iid, hpu_asm::MemId::Addr(op.addr.base_cid))
                         }
                         hpu_asm::dop::UcoreAlias::Heap { bid } => {
-                            // NB: B2B heap follow user space CT
-                            // TODO: Add dedicated size for B2B_heap ?
+                            // NB: Fused with std heap
                             let mid = hpu_asm::MemId::Addr(hpu_asm::CtId(
-                                (self.params.ct_mem - self.params.ct_heap) as u16 + bid,
+                                (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
+                                    as u16
+                                    - bid,
                             ));
                             (iop.get_iid(), mid)
                         }
@@ -492,9 +583,15 @@ impl UCore {
                         hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
                         | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => {
                             inner.slot = match inner.slot {
-                                hpu_asm::MemId::Heap { bid } => hpu_asm::MemId::Addr(
-                                    hpu_asm::CtId((self.params.ct_mem - 1) as u16 - bid),
-                                ),
+                                hpu_asm::MemId::Heap { bid } => {
+                                    hpu_asm::MemId::Addr(hpu_asm::CtId(
+                                        (self.params.ct_user
+                                            + self.params.ct_b2b
+                                            + self.params.ct_heap
+                                            - 1) as u16
+                                            - bid,
+                                    ))
+                                }
                                 hpu_asm::MemId::Src { tid, bid } => {
                                     let operand = iop.src()[tid as usize];
                                     if operand.props.pos.0 == self.params.node_id {
@@ -530,8 +627,7 @@ impl UCore {
                                         let mut inner = self.inner.lock().unwrap();
 
                                         // 1. Allocate temporary value in the B2B_pool
-                                        // TODO: properly handle pool empty case
-                                        let src_addr = inner.b2b_pool.pop().unwrap();
+                                        let src_cid = inner.b2b_pool.get_tagged(iop.get_iid());
 
                                         // 2. Register access in the dst_write queue
                                         // Associated Dma call are issued between:
@@ -539,13 +635,13 @@ impl UCore {
                                         //  *  Forward to host
                                         inner.dst_stq.push(WrOrder {
                                             iid: iop.get_iid(),
-                                            src_addr,
+                                            src_cid,
                                             dst_hid: operand.props.pos,
-                                            dst_addr: hpu_asm::CtId(
+                                            dst_cid: hpu_asm::CtId(
                                                 operand.addr.base_cid.0 + bid as u16,
                                             ),
                                         });
-                                        hpu_asm::MemId::Addr(src_addr)
+                                        hpu_asm::MemId::Addr(src_cid)
                                     }
                                 }
                                 hpu_asm::MemId::Addr(ct_id) => hpu_asm::MemId::Addr(ct_id),
@@ -557,7 +653,7 @@ impl UCore {
                         | hpu_asm::DOp::SUBS(hpu_asm::dop::DOpSubs(inner))
                         | hpu_asm::DOp::SSUB(hpu_asm::dop::DOpSsub(inner))
                         | hpu_asm::DOp::MULS(hpu_asm::dop::DOpMuls(inner)) => {
-                            patch_imm(iop, &mut inner.msg_cst);
+                            Self::patch_imm(iop, &mut inner.msg_cst);
                             Some(dop_patch)
                         }
                         // Deferred execution
@@ -640,24 +736,46 @@ impl UCore {
                 Some(Event::Received(payload)) => {
                     log!(|self| log::Category::Own, log::Verbosity::Info => iop, dop, payload => "Received");
                     // Value ready but not retrieved yet
-                    // Start B2B Dma for each ciphertext flit
-                    // TODO: Issue a dma request for each ciphertext bank
-                    // TODO: Compute correct addr/lenght
-                    let src_addr = Addr::Phys(0); // TODO must depends on payload.slot
-                    let dst_mid = hpu_asm::MemId::Heap { bid: 0 }; // TODO must depends on dop.alias
-                    let dst_addr = Addr::Phys(0); // TODO must depends on dop.alias
-                    let dma_pkt = DmaBus::new_wrapped(
-                        (payload.hid.0, src_addr),
-                        (self.params.node_id, dst_addr),
-                        protocol::addr::Pattern::Simple(10.MiB()),
-                        None,
-                    );
-                    let _ = self.dma.b_req_resp(dma_pkt).await?;
+                    let src_cid = match payload.slot {
+                        hpu_asm::MemId::Addr(cid) => cid,
+                        hpu_asm::MemId::Heap { bid } =>
+                                    hpu_asm::CtId(
+                                        (self.params.ct_user
+                                            + self.params.ct_b2b
+                                            + self.params.ct_heap
+                                            - 1) as u16
+                                            - bid,
+                                    )
+                        ,
+                        hpu_asm::MemId::Src { tid, bid } => {
+                                    let operand = iop.src()[tid as usize];
+                            hpu_asm::CtId(
+                                            operand.addr.base_cid.0 + bid as u16,
+                                        )},
+                        hpu_asm::MemId::Dst {..} => panic!("Mustn't use LD_B2B on a dst templated IOp operand"),
+                    };
+
+                    // Allocate temporary value in the B2B_pool
+                    let dst_cid = self.inner.lock().unwrap().b2b_pool.get_tagged(iop.get_iid());
+                    let src_addr = self.cid_to_addr(src_cid);
+                    let dst_addr = self.cid_to_addr(dst_cid);
+
+                    let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter()).map(|(src,dst)| 
+                            DmaBus::new_wrapped(
+                                (payload.hid.0, src),
+                                (self.params.node_id, dst),
+                                self.ct_pc_pattern(),
+                                None,
+                            )).collect::<Vec<_>>();
+
+                    // Only check for error
+                    // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
+                    self.dma.b_req_resp_burst(dma_req).await.into_iter().map(|(_resp, res)| res).collect::<Result<(),_>>()?;
 
                     // Update event state
                     let mut inner = self.inner.lock().unwrap();
                     let event = inner.event_list.get_mut(&(iid, alias)).unwrap();
-                    *event = Event::Resolved(dst_mid);
+                    *event = Event::Resolved(hpu_asm::MemId::Addr(dst_cid));
                 }
                 None => {
                     log!(|self| log::Category::Own, log::Verbosity::Info => iop, dop => "Pending");
@@ -690,6 +808,50 @@ impl UCore {
         }
     }
 
+    /// Issue all dst write order belonging to `for_iid`.
+    /// Kept other one in the queue
+    async fn flush_dst_stq(&self, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
+        //1. Filter out all store request that belong to current iop
+        // Store back unmatch WrOrder in queue
+        let cur_ord = {
+            let mut inner = self.inner.lock().unwrap();
+            // let (cur_ord, remains): (Vec<_>, Vec<_>) =
+            //     inner.dst_stq.iter().partition(|e| e.iid == for_iid);
+            // inner.dst_stq = remains;
+
+            // TODO Use partition_in_place to reduce allocation ?!
+            let remains_elem = inner
+                .dst_stq
+                .iter_mut()
+                .partition_in_place(|e| e.iid != for_iid);
+             inner.dst_stq.split_off(remains_elem)
+         };
+
+        // 2. Execute WrOrder
+        let dma_order = cur_ord
+            .iter()
+            .flat_map(|order| {
+                let src_addr = self.cid_to_addr(order.src_cid);
+                let dst_addr = self.cid_to_addr(order.dst_cid);
+
+                std::iter::zip(src_addr.into_iter(), dst_addr.into_iter()).map(|(src,dst)| 
+
+                DmaBus::new_wrapped(
+                    (self.params.node_id, src),
+                    (order.dst_hid.0, dst),
+                    self.ct_pc_pattern(),
+                    None,
+                )).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // Only check for error
+        // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
+        self.dma.b_req_resp_burst(dma_order).await.into_iter().map(|(_resp, res)| res).collect::<Result<(),_>>()?;
+
+        Ok(())
+    }
+
     /// Check around event insertion in event_list
     fn insert_event(&self, ucore_pld: hpu_asm::dop::UcorePayload) {
         if ucore_pld.opcode.is_sync_inst() {
@@ -708,16 +870,6 @@ impl UCore {
             event::Event::triggered(&forge_event_name!(|self| "sync_evt"), None);
         } else {
             panic!("Invalid Opcode received in UcorePayload control endpoint {ucore_pld:?}")
-        }
-    }
-}
-
-/// Utility function to patch immediat argument
-fn patch_imm(iop: &hpu_asm::IOp, imm: &mut hpu_asm::ImmId) {
-    *imm = match imm {
-        hpu_asm::ImmId::Cst(val) => hpu_asm::ImmId::Cst(*val),
-        hpu_asm::ImmId::Var { tid, bid } => {
-            hpu_asm::ImmId::Cst(iop.imm()[*tid as usize].msg_block(*bid))
         }
     }
 }
