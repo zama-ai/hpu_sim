@@ -129,7 +129,7 @@ fn elaborate(
             bandwidth: 10.MiB_s(),
             port_cap: None,
         },
-        root.child_properties("n2n_xbar", Default::default()),
+        root.child_properties("b2b_switch", Default::default()),
     ));
     root.insert_module(switch.clone());
     let ctrl_switch = Arc::new(ra2m_cpn::net::SplitSwitch::<u8, UcorePayload>::new(
@@ -218,9 +218,9 @@ fn elaborate(
         // Attach to cluster Switch
         // NB: each switch interface currently used two ports
         let net_out = format!("{name}::net_outbound");
-        root.inner_bind("n2n_xbar::ingress", &net_out)?;
+        root.inner_bind("b2b_switch::ingress", &net_out)?;
         let net_in = format!("{name}::net_inbound");
-        root.inner_bind("n2n_xbar::egress", &net_in)?;
+        root.inner_bind("b2b_switch::egress", &net_in)?;
         // TODO fixme port_nb must be return by bind function over PortVec
         switch.register_port(id, *id as usize)?;
 
@@ -230,6 +230,17 @@ fn elaborate(
         // TODO fixme port_nb must be return by bind function over PortVec
         ctrl_switch.register_port(id, *id as usize)?;
     }
+
+    fn show(module: &dyn Module) {
+        for m in module.inner_match(".*") {
+            println!("{} => {}", m.properties().uid(), m.properties().path());
+            if !m.is_leaf() {
+                show(m)
+            }
+        }
+    }
+
+    show(&root);
 
     Ok(root)
 }
