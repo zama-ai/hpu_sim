@@ -148,6 +148,7 @@ fn elaborate(
         hpu_core: HpuCoreParams {},
         ucore: UCoreParams {
             node_id: 0,
+            cluster_nodes: config.fpga.node_id.clone(),
             fw_pc: config.board.fw_pc,
             ct_pc: config.board.ct_pc.clone(),
             ct_user: config.board.user_size,
