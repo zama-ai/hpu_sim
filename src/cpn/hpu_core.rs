@@ -113,15 +113,8 @@ impl HpuCore {
                 .expect("Issue with DOpPayload xfer")
                 .unwrap_payload();
 
-            log!(|self| log::Category::Own, log::Verbosity::Info => dop);
-            match &dop.inner {
-                hpu_asm::DOp::SYNC(_dop_sync) => {
-                    // loopback DOp as ack
-                    let ack_pkt = Packet::wrap_payload(dop, Default::default());
-                    self.ack.fwd_pkt(ack_pkt).await;
-                }
-                _ => {}
-            }
+
+                self.exec(dop).await.expect("Error with DOp execution");
         }
     }
 }
@@ -171,7 +164,7 @@ impl HpuCore {
 }
 
 impl HpuCore {
-    async fn exec(&mut self, dop: DOpPayload) -> Result<(), anyhow::Error> {
+    async fn exec(&self, dop: DOpPayload) -> Result<(), anyhow::Error> {
         {
             let inner = self.inner.lock().unwrap();
             log!(|self| log::Category::Own, log::Verbosity::Debug => inner.pc, dop);
@@ -236,41 +229,47 @@ impl HpuCore {
             }
 
             hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(insn)) => {
-                let mut inner = self.inner.lock().unwrap();
-                let dst = &mut inner.regfile[insn.rid.0 as usize];
                 let cid_ofst = match insn.slot {
                     hpu_asm::MemId::Addr(ct_id) => ct_id,
                     _ => panic!("Template must have been resolved before execution"),
                 };
 
-                let ct_addrs = self.cid_to_addr(cid_ofst);
 
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
-                for (hpu_slice, addr) in std::iter::zip(
-                    dst.as_mut_view().into_container(),
-                    ct_addrs,
-                ) {
-                let mem_req = MemBus::new_wrapped(self.props.uid(), Command::Read,
-                        addr,
-                                self.ct_pc_pattern(),None, None);
+                let mut ct_mem = Vec::new();
+                let mem_req= self.cid_to_addr(cid_ofst).into_iter().map(|addr| 
+                    MemBus::new_wrapped(self.props.uid(), Command::Read, addr, self.ct_pc_pattern(),None, None)
+                ).collect::<Vec<_>>();
 
-                    let resp = self.mem.b_req_resp(mem_req).await?;
-                    let data = resp.payload().data();
+                for req in mem_req.into_iter() {
+                    let resp = self.mem.b_req_resp(req).await?;
+                    ct_mem.push(resp.unwrap_payload());
+                }
+
+                let mut inner = self.inner.lock().unwrap();
+                let dst = &mut inner.regfile[insn.rid.0 as usize];
+
+                for (hpu_slice, mem_slice ) in std::iter::zip(
+                    dst.as_mut_view().into_container(),
+                    ct_mem,
+                ) {
                     // NB: Chunk are extended to enforce page align buffer
                     // -> To prevent error during copy, with shrink the mem buffer to
                     // the real   size before-hand
-                    let size_b = std::mem::size_of_val(data);
-                    let data_u64 = bytemuck::cast_slice::<u8, u64>(&data.as_slice()[0..size_b]);
+                    let data_u64 = bytemuck::cast_slice::<u8, u64>(mem_slice.data().as_slice());
                     hpu_slice.clone_from_slice(data_u64);
                 }
                 self.show_trivial_reg(insn.rid);
             }
 
             hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(insn)) => {
-                let inner = self.inner.lock().unwrap();
 
-                let src= &inner.regfile[insn.rid.0 as usize];
+                let src= {
+                    let inner = self.inner.lock().unwrap();
+                    inner.regfile[insn.rid.0 as usize].clone()
+                };
+
                 let cid_ofst = match insn.slot {
                     hpu_asm::MemId::Addr(ct_id) => ct_id,
                     _ => panic!("Template must have been resolved before execution"),
@@ -442,7 +441,7 @@ impl HpuCore {
     /// NB: Current Pbs lookup function arn't reverted from Hbm memory
     /// TODO: Read PbsLut from Hbm instead of online generation based on Pbs Id
     async fn apply_pbs2reg(
-        &mut self,
+        & self,
         opcode_lut_nb: u8,
         dst_rid: hpu_asm::RegId,
         src_rid: hpu_asm::RegId,
@@ -514,12 +513,11 @@ impl HpuCore {
             }
         } else {
             let mut tfhe_lut = tfhe_lut;
-            // Get keys and computation buffer
-            let (ksk, ref mut bfr_after_ks, bsk) = self.get_server_key().await?;
-
-            // TODO add a check on trivialness for fast simulation ?
-            keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
-            blind_rotate_ntt64_bnf_assign(bfr_after_ks, &mut tfhe_lut, &bsk);
+            self.with_server_key(|ksk, bfr_after_ks, bsk|
+            {
+                keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
+                blind_rotate_ntt64_bnf_assign(bfr_after_ks, &mut tfhe_lut, &bsk);
+            }).await?;
 
             assert_eq!(
                 dst_rid.0,
@@ -561,8 +559,8 @@ impl HpuCore {
     }
 
     /// Insert a cpu value into the register file
-    fn cpu2reg(&mut self, reg_id: hpu_asm::RegId, cpu: LweCiphertextView<u64>) {
-        let inner = self.inner.lock().unwrap();
+    fn cpu2reg(&self, reg_id: hpu_asm::RegId, cpu: LweCiphertextView<u64>) {
+        let mut inner = self.inner.lock().unwrap();
         let hpu = HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.rtl_params.clone());
         std::iter::zip(
             inner.regfile[reg_id.0 as usize]
@@ -575,19 +573,20 @@ impl HpuCore {
         });
     }
 
-    /// Get the inner server key used for computation
+    /// Closure used to work with server_key
     /// Check the register state and extract sks from memory if needed
-    async fn get_server_key(
-        &mut self,
-    ) -> Result<(
+    async fn with_server_key(
+        &self,
+        f_on_sks: impl FnOnce(
         &LweKeyswitchKeyOwned<u32>,
         &mut LweCiphertextOwned<u32>,
-        &NttLweBootstrapKeyOwned<u64>,
-    ), anyhow::Error> {
+        &NttLweBootstrapKeyOwned<u64>,)
+    ) -> Result<(), anyhow::Error> {
         let sks_is_none= {
             let inner = self.inner.lock().unwrap();
             inner.sks.is_none()
                 };
+        // Retrieved key from memory in internal cache
         if sks_is_none {
             log!(|self| log::Category::Own, log::Verbosity::Debug => => "Reload Bsk/Ksk from memory");
             // TODO check state of Bsk/Ksk in register
@@ -638,7 +637,7 @@ impl HpuCore {
             };
             let hpu_ksk = {
                 // Create Hpu ksk container
-                let mut ksk = HpuLweBootstrapKeyOwned::new(0, self.params.rtl_params.clone());
+                let mut ksk = HpuLweKeyswitchKeyOwned::new(0, self.params.rtl_params.clone());
 
                 // Copy content from Hbm
                 let hw_slice = ksk.as_mut_view().into_container();
@@ -683,8 +682,13 @@ impl HpuCore {
             let mut inner = self.inner.lock().unwrap();
             inner.sks = Some((cpu_ksk, bfr_after_ks, cpu_bsk));
         }
-        let (ksk, bfr, bsk) = self.sks.as_mut().unwrap();
-        Ok((ksk, bfr, bsk))
+
+        // Apply function with local cache key
+        let mut inner = self.inner.lock().unwrap();
+            let (ksk, bfr_after_ks, bsk) = inner.sks.as_mut().unwrap();
+            f_on_sks(ksk, bfr_after_ks, bsk);
+
+        Ok(())
     }
     }
 

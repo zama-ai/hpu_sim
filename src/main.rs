@@ -145,7 +145,15 @@ fn elaborate(
 
     // List of nodes
     let mut node_params = HpuNodeParams {
-        hpu_core: HpuCoreParams {},
+        hpu_core: HpuCoreParams {
+            rtl_params: params.clone(),
+            ct_pc: config.board.ct_pc.clone(),
+            ksk_pc: config.board.ksk_pc.clone(),
+            bsk_pc: config.board.bsk_pc.clone(),
+            hbm_global_ofst: 0x40_0000_0000,
+            hbm_pc_ofst: 0x2000_0000,
+            trivial: true, // TODO toggle this with CLI knobs
+        },
         ucore: UCoreParams {
             node_id: 0,
             cluster_nodes: config.fpga.node_id.clone(),
