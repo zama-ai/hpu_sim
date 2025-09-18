@@ -427,7 +427,7 @@ impl UCore {
             
             Addr::Phys(match mem_kind {
                 MemKind::Ddr { offset } => offset + ct_ofst,
-                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst,
+                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst + ct_ofst,
             })).collect::<Vec<_>>()
     }
 

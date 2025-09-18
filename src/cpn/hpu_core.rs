@@ -235,6 +235,7 @@ impl HpuCore {
                 };
 
 
+                //1. Issue Mem read requests
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
                 let mut ct_mem = Vec::new();
@@ -247,25 +248,36 @@ impl HpuCore {
                     ct_mem.push(resp.unwrap_payload());
                 }
 
-                let mut inner = self.inner.lock().unwrap();
-                let dst = &mut inner.regfile[insn.rid.0 as usize];
+                //2. Write data inside regfile
+                // NB: Don't do both at same time (i.e mem_req, write in regfile) to prevent having a Mutex lock
+                // across await points
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    let dst = &mut inner.regfile[insn.rid.0 as usize];
 
-                for (hpu_slice, mem_slice ) in std::iter::zip(
-                    dst.as_mut_view().into_container(),
-                    ct_mem,
-                ) {
-                    // NB: Chunk are extended to enforce page align buffer
-                    // -> To prevent error during copy, with shrink the mem buffer to
-                    // the real   size before-hand
-                    let data_u64 = bytemuck::cast_slice::<u8, u64>(mem_slice.data().as_slice());
-                    hpu_slice.clone_from_slice(data_u64);
+                    for (hpu_slice, mem_slice ) in std::iter::zip(
+                        dst.as_mut_view().into_container(),
+                        ct_mem,
+                    ) {
+                        // NB: Chunk are extended to enforce page align buffer
+                        // -> To prevent error during copy, with shrink the mem buffer to
+                        // the real   size before-hand
+                        let data = mem_slice.data().as_slice();
+                        let size_b = std::mem::size_of_val(hpu_slice);
+                        let data_u64 = bytemuck::cast_slice::<u8, u64>(&data[0..size_b]);
+                        hpu_slice.clone_from_slice(data_u64);
+                    }
                 }
                 self.show_trivial_reg(insn.rid);
             }
 
             hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(insn)) => {
 
-                let src= {
+                //1. Read data inside regfile
+                // NB: Don't do both at same time (i.e. read in regfile and write in memory) to prevent having a Mutex lock
+                // across await points
+                // TODO prevent cloning ?!
+                let src = {
                     let inner = self.inner.lock().unwrap();
                     inner.regfile[insn.rid.0 as usize].clone()
                 };
@@ -275,8 +287,9 @@ impl HpuCore {
                     _ => panic!("Template must have been resolved before execution"),
                 };
 
-                let ct_addrs = self.cid_to_addr( cid_ofst);
+                let ct_addrs = self.cid_to_addr(cid_ofst);
 
+                //2. Built request and write data in memory
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
                 for (hpu_slice, addr) in std::iter::zip(
@@ -285,9 +298,13 @@ impl HpuCore {
                 ) {
                     let data_u8 = bytemuck::cast_slice::<u64, u8>(&hpu_slice);
 
-                    let mem_req = MemBus::new_wrapped(self.props.uid(), Command::Write,
+                    let mem_req = MemBus::new_wrapped(
+                        self.props.uid(),
+                         Command::Write,
                         addr,
-                                self.ct_pc_pattern(),Some(data_u8), None);
+                        Pattern::Simple(data_u8.len().Byte()), // Only write used data, not the memory used for padding
+                        Some(data_u8),
+                         None);
 
                      self.mem.b_req_resp(mem_req).await?;
                 }
@@ -427,7 +444,6 @@ impl HpuCore {
                 self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?
             }
         }
-
         // Dump operation src/dst in file if required
         self.dump_op_reg(&dop_inner);
 
@@ -713,7 +729,7 @@ impl HpuCore {
             
             Addr::Phys(match mem_kind {
                 MemKind::Ddr { offset } => offset + ct_ofst,
-                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst,
+                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst + ct_ofst,
             })).collect::<Vec<_>>()
     }
 

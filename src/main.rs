@@ -152,7 +152,7 @@ fn elaborate(
             bsk_pc: config.board.bsk_pc.clone(),
             hbm_global_ofst: 0x40_0000_0000,
             hbm_pc_ofst: 0x2000_0000,
-            trivial: true, // TODO toggle this with CLI knobs
+            trivial: args.trivial,
         },
         ucore: UCoreParams {
             node_id: 0,
