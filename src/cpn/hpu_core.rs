@@ -532,7 +532,22 @@ impl HpuCore {
             self.with_server_key(|ksk, bfr_after_ks, bsk|
             {
                 keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
-                blind_rotate_ntt64_bnf_assign(bfr_after_ks, &mut tfhe_lut, &bsk);
+
+            let modulus_switch_type = self.params.rtl_params.pbs_params.modulus_switch_type;
+
+            let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
+            let bfr_after_ms = match modulus_switch_type {
+                HpuModulusSwitchType::Standard => {
+                    lwe_ciphertext_modulus_switch(bfr_after_ks.as_view(), log_modulus)
+                }
+                HpuModulusSwitchType::CenteredMeanNoiseReduction => {
+                    lwe_ciphertext_centered_binary_modulus_switch(
+                        bfr_after_ks.as_view(),
+                        log_modulus,
+                    )
+                }
+            };
+                blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, &bsk);
             }).await?;
 
             assert_eq!(
@@ -622,7 +637,7 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = bsk.as_mut_view().into_container();
-                for (id, (hpu, mem_kind)) in 
+                for (_id, (hpu, mem_kind)) in 
                 std::iter::zip(hw_slice, self.params.bsk_pc.iter())
                     .enumerate(){
 
@@ -657,7 +672,7 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = ksk.as_mut_view().into_container();
-                for (id, (hpu, mem_kind)) in 
+                for (_id, (hpu, mem_kind)) in 
                 std::iter::zip(hw_slice, self.params.ksk_pc.iter()).enumerate() {
                         // View cache container as bytes
                         let hpu_u8= bytemuck::cast_slice_mut::<u64, u8>(hpu);

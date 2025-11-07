@@ -1,9 +1,9 @@
 [pbs_params]
-    lwe_dimension=804
+    lwe_dimension=879
     glwe_dimension=1
     polynomial_size=2048
-    lwe_noise_distribution={GaussianStdDev= 5.963599673924788e-6}
-    glwe_noise_distribution={GaussianStdDev= 2.8452674713391114e-15}
+    lwe_noise_distribution={TUniformBound= 3}
+    glwe_noise_distribution={TUniformBound= 17}
     pbs_base_log= 23
     pbs_level= 1
     ks_base_log= 2
@@ -12,8 +12,8 @@
     carry_width= 2
     ciphertext_width= 64
     opportunistic=true
-    log2_p_fail=-64 
-    modulus_switch_type= "Standard"
+    log2_p_fail=-128
+    modulus_switch_type= "CenteredMeanNoiseReduction"
 
 [ntt_params]
     core_arch= {GF64=[5,6]}
@@ -36,7 +36,7 @@
 [pc_params]
     ksk_pc= 16
     ksk_bytes_w= 32
-    bsk_pc= 8
+    bsk_pc= 16
     bsk_bytes_w= 32
     pem_pc= 2
     pem_bytes_w= 32
