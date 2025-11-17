@@ -57,6 +57,8 @@ struct UCoreInner {
     event_list: HashMap<UcoreHash, Event>,
     b2b_pool: B2bPool,
     dst_stq: Vec<DstWrOrder>,
+    // Use to detect restart on the user side (i.e. start of a new application)
+    cur_iop: hpu_asm::IOpId,
 }
 
 impl UCoreInner {
@@ -67,6 +69,7 @@ impl UCoreInner {
             event_list: HashMap::new(),
             b2b_pool: B2bPool::new(),
             dst_stq: Vec::new(),
+            cur_iop: hpu_asm::SW_IOP_ID,
         }
     }
 }
@@ -97,7 +100,7 @@ impl B2bPool {
             free: Vec::new(),
         used_lifetime: HashMap::new(),
         }
-        }
+    }
     fn add_slot(&mut self, slots: &[hpu_asm::CtId]) {
         self.free.extend_from_slice(slots);
     }
@@ -116,6 +119,12 @@ impl B2bPool {
     fn release_tagged(&mut self, iid: hpu_asm::IOpId) {
         if let Some(used) = self.used_lifetime.remove(&iid) {
             self.free.extend_from_slice(&used);
+        }
+    }
+
+    fn release_all(&mut self) {
+        for (_, slot) in self.used_lifetime.iter_mut() {
+            self.free.append(slot)
         }
     }
 }
@@ -355,7 +364,20 @@ impl UCore {
 
             if let Some(iop) = iop_pdg {
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
-                self.inner.lock().unwrap().iop_pdg.push_back(iop.clone());
+
+
+                {  // Mutex scope
+                   let mut inner = self.inner.lock().unwrap();
+                   // Check for user side restart
+                   if inner.cur_iop >= iop.get_iid() {
+                       // Flush internal state
+                       inner.b2b_pool.release_all();
+                       inner.event_list.clear();
+                   }
+                   inner.cur_iop = iop.get_iid();
+                   inner.iop_pdg.push_back(iop.clone());
+                   event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
+                }
 
                 // Retrived DOp stream from memory
                 let dops = self.load_fw(&iop).await;
@@ -381,6 +403,14 @@ impl UCore {
                 .expect("Issue with Ctrl xfer")
                 .inner_unwrap()
                 .unwrap_payload();
+
+        // Stall event handling while there is no iop_pending
+        // Aims is to correctly detect user reset (i.e. start of new application)
+        // and prevent clash with event_list
+        let iop_empty= self.inner.lock().unwrap().iop_pdg.is_empty();
+        if iop_empty {
+            event::Event::wait(&forge_event_name!(|self| "NoIOpPending")).await;
+        }
 
             self.insert_event(ucore_pld);
         }
@@ -844,7 +874,8 @@ impl UCore {
             .insert(hash, Event::Received(ucore_pld));
         if let Some(event) = present {
             panic!(
-                "Received duplicated event @{hash:?} =>{event:?}",
+                "Ucore {}: Received duplicated event @{hash:?} => {event:?}",
+                self.params.node_id
             );
         }
         // Notify to wake up pending task
