@@ -131,10 +131,7 @@ use tfhe::core_crypto::entities::{
 use tfhe::core_crypto::hpu::glwe_lookuptable::create_hpu_lookuptable;
 use tfhe::core_crypto::prelude::*;
 use tfhe::shortint::parameters::KeySwitch32PBSParameters;
-use tfhe::tfhe_hpu_backend::fw::isc_sim::{PeConfigStore, Scheduler};
 
-use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
-use tfhe::tfhe_hpu_backend::prelude::*;
 
 impl HpuCore {
     fn trivial_decode<T: UnsignedInteger>(&self, body: T) -> T {
@@ -296,7 +293,7 @@ impl HpuCore {
                     src.as_view().into_container(),
                     ct_addrs,
                 ) {
-                    let data_u8 = bytemuck::cast_slice::<u64, u8>(&hpu_slice);
+                    let data_u8 = bytemuck::cast_slice::<u64, u8>(hpu_slice);
 
                     let mem_req = MemBus::new_wrapped(
                         self.props.uid(),
@@ -486,7 +483,7 @@ impl HpuCore {
         // Compute Lut properties
         let (modulus_sup, box_size, fn_stride) = {
             let pbs_p = &self.params.rtl_params.pbs_params;
-            let modulus_sup = 1_usize << pbs_p.message_width + pbs_p.carry_width;
+            let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
             let box_size = pbs_p.polynomial_size / modulus_sup;
             // Max valid degree for a ciphertext when using the LUT we generate
             // If MaxDegree == 1, we can have two input values 0 and 1, so we need MaxDegree + 1
@@ -547,7 +544,7 @@ impl HpuCore {
                     )
                 }
             };
-                blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, &bsk);
+                blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, bsk);
             }).await?;
 
             assert_eq!(
@@ -559,7 +556,7 @@ impl HpuCore {
             // Compute ManyLut function stride
             let fn_stride = {
                 let pbs_p = &self.params.rtl_params.pbs_params;
-                let modulus_sup = 1_usize << pbs_p.message_width + pbs_p.carry_width;
+                let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
                 let box_size = pbs_p.polynomial_size / modulus_sup;
                 // Max valid degree for a ciphertext when using the LUT we generate
                 // If MaxDegree == 1, we can have two input values 0 and 1, so we need MaxDegree + 1
@@ -637,9 +634,8 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = bsk.as_mut_view().into_container();
-                for (_id, (hpu, mem_kind)) in 
-                std::iter::zip(hw_slice, self.params.bsk_pc.iter())
-                    .enumerate(){
+                for (hpu, mem_kind) in 
+                std::iter::zip(hw_slice, self.params.bsk_pc.iter()){
 
                         // View cache container as bytes
                         let hpu_u8= bytemuck::cast_slice_mut::<u64, u8>(hpu);
@@ -672,8 +668,8 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = ksk.as_mut_view().into_container();
-                for (_id, (hpu, mem_kind)) in 
-                std::iter::zip(hw_slice, self.params.ksk_pc.iter()).enumerate() {
+                for (hpu, mem_kind) in 
+                std::iter::zip(hw_slice, self.params.ksk_pc.iter()) {
                         // View cache container as bytes
                         let hpu_u8= bytemuck::cast_slice_mut::<u64, u8>(hpu);
 

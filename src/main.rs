@@ -5,7 +5,7 @@
 //!
 //! WARN: User must start the HpuSim binary before tfhe-rs application
 
-use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, Regmap, RegmapParams, UCoreParams};
+use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
 
@@ -117,7 +117,7 @@ fn elaborate(
 
     let mut root = module::Area::new(module::Properties::new(
         "root".to_owned(),
-        types::ClockDomain::new(args.frequency.clone()),
+        types::ClockDomain::new(args.frequency),
     ));
 
     // Cluster level component

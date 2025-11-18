@@ -260,7 +260,7 @@ impl Regmap {
                 (ntt_p.batch_pbs_nb + (ntt_p.total_pbs_nb << 8)) as u32
             }
             "info::ntt_modulo" => {
-                MOD_NTT_NAME_OFS + (self.params.rtl.ntt_params.prime_modulus.clone() as u8) as u32
+                MOD_NTT_NAME_OFS + (self.params.rtl.ntt_params.prime_modulus as u8) as u32
             }
 
             "info::application" => {

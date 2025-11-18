@@ -4,11 +4,9 @@
 //! Each node has it's own host interface and are connected together through a Xbar
 //! No custom logic inside HpuCluster, it's only a think wrapper around inner modules.
 
-use std::ops::Deref;
-
 use ra2m::prelude::anyhow::Error;
 use ra2m::prelude::*;
-use ra2m::ra2m_cpn::{ffi, mem};
+use ra2m::ra2m_cpn::mem;
 
 use super::*;
 
