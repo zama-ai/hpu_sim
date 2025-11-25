@@ -110,7 +110,7 @@ impl Regmap {
 
         // Register as request handler
         req.trace_mut()
-            .push(history::Handler::base(*self.properties().uid()));
+            .push(types::Handler::base(*self.properties().uid()));
 
         // Compute frontend delay
         // => Time required to decode the address and access the internal register array

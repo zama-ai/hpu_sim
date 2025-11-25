@@ -20,25 +20,29 @@ pub const HBM_KSK_PC_MAX: usize = 16;
 
 //Come type use as cpn interface.
 // Thin wrapper around tfhe_hpu_backend type with extra trait for simulation logging/tracing
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
+#[history(trace)]
 pub struct DOpPayload {
     inner: hpu_asm::DOp,
+
+    // inner assembly view as String
+    // Use for tracing only, since we cannot implement foreign trait Traceable on foreign type DOp
+    #[trace]
+    asm_view: String,
+
     /// Contain history of the handling information of a given access through its route across the
     /// architecture (From the requester up to the responder and back for acknowledgement)
-    trace: History,
-}
-impl DOpPayload {
-    pub fn new(dop: hpu_asm::DOp) -> Self {
-        Self {
-            inner: dop,
-            trace: Default::default(),
-        }
-    }
+    trace: types::History,
 }
 
-impl Trace for DOpPayload {
-    fn get_history_mut(&mut self) -> Option<&mut History> {
-        Some(&mut self.trace)
+impl DOpPayload {
+    pub fn new(dop: hpu_asm::DOp) -> Self {
+        let asm_view = dop.to_string();
+        Self {
+            inner: dop,
+            asm_view,
+            trace: Default::default(),
+        }
     }
 }
 
