@@ -9,6 +9,7 @@ use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCorePar
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
 
+static OUTPUT_FOLDER: &'static str = "/tmp/hpu_sim";
 /// Define CLI arguments
 use clap::Parser;
 #[derive(clap::Parser, Debug, Clone)]
@@ -147,6 +148,10 @@ fn elaborate(
     let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {
             rtl_params: params.clone(),
+            sim_config: hpuc_sim::hpu::HpuConfig::from(
+                hpuc_sim::hpu::PhysicalConfig::gaussian_64b_fast(),
+            ),
+            sim_trace: true,
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
             bsk_pc: config.board.bsk_pc.clone(),

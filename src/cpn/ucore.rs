@@ -746,6 +746,7 @@ impl UCore {
                 // Wrapped DOp in packet and send them to HpuCore
                 let dop_pkt = Packet::wrap_payload(DOpPayload::new(dop), Default::default());
                 self.hpu_req.send_pkt(dop_pkt).await?;
+                delay::Delay::wait_for((unit::Time::from(self.props.clock_domain().frequency())*40.0).into()).await;
             }
         }
 
