@@ -152,12 +152,15 @@ fn elaborate(
                 hpuc_sim::hpu::PhysicalConfig::gaussian_64b_fast(),
             ),
             sim_trace: true,
+            trivial: args.trivial,
+
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
             bsk_pc: config.board.bsk_pc.clone(),
+            trace_pc: config.board.trace_pc.clone(),
+            trace_depth: config.board.trace_depth,
             hbm_global_ofst: 0x40_0000_0000,
             hbm_pc_ofst: 0x2000_0000,
-            trivial: args.trivial,
         },
         ucore: UCoreParams {
             node_id: 0,

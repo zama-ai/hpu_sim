@@ -18,10 +18,21 @@ pub const MEM_CT_PC_MAX: usize = 2;
 pub const HBM_BSK_PC_MAX: usize = 16;
 pub const HBM_KSK_PC_MAX: usize = 16;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Clone, Default)]
+pub enum DOpState {
+    #[default]
+    Refill,
+    Issue,
+    RdUnlock,
+    WrUnlock,
+    Retire,
+}
+
 //Come type use as cpn interface.
 // Thin wrapper around tfhe_hpu_backend type with extra trait for simulation logging/tracing
 #[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
 #[history(trace)]
+#[trace_custom(DOpState)]
 pub struct DOpPayload {
     inner: hpu_asm::DOp,
 
@@ -32,7 +43,7 @@ pub struct DOpPayload {
 
     /// Contain history of the handling information of a given access through its route across the
     /// architecture (From the requester up to the responder and back for acknowledgement)
-    trace: types::History,
+    trace: types::History<DOpState>,
 }
 
 impl DOpPayload {
