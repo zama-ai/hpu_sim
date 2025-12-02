@@ -33,3 +33,4 @@ clap = { version = "=4.5.30", features = ["derive"] }
 bytemuck = "1.23.2"
 serde = { version = "1", features = ["derive"] }
 itertools = "0.14.0"
+bitfield-struct = "0.12.1"

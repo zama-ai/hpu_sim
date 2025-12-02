@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
@@ -12,6 +14,9 @@ pub use ucore::{UCore, UCoreParams};
 
 pub mod regmap;
 pub use regmap::{Regmap, RegmapParams};
+
+use bitfield_struct::bitfield;
+use thiserror::Error;
 
 // Some properties regarding memory PC
 pub const MEM_CT_PC_MAX: usize = 2;
@@ -28,7 +33,7 @@ pub enum DOpState {
     Retire,
 }
 
-//Come type use as cpn interface.
+//Common type use as cpn interface.
 // Thin wrapper around tfhe_hpu_backend type with extra trait for simulation logging/tracing
 #[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
 #[history(trace)]
@@ -65,5 +70,121 @@ impl TxStatus for DOpPayload {
 impl RxStatus for DOpPayload {
     fn rx_check(&self) -> Result<(), anyhow::Error> {
         Ok(())
+    }
+}
+
+// Isc trace byte layout
+// Define format of isc_trace words
+#[derive(Debug)]
+pub struct IscTrace {
+    state: IscPoolState,
+    insn: u32,
+    timestamp: u32,
+}
+
+#[derive(Debug)]
+pub struct IscPoolState {
+    flags: IscPoolFlags,
+    wr_lock: u32,
+    rd_lock: u32,
+    issue_lock: u32,
+    sync_id: u32,
+}
+
+#[bitfield(u32)]
+pub struct IscPoolFlags {
+    pdg: bool,
+    rd_pdg: bool,
+    vld: bool,
+    #[bits(3)]
+    state: u8,
+    #[bits(26)]
+    _reserved: u32,
+}
+
+/// Parsing error
+#[derive(Error, Debug, Clone)]
+pub enum TraceParsingError {
+    #[error("Incomplete stream")]
+    EmptyStream,
+}
+
+impl IscTrace {
+    pub fn from_words(stream: &mut VecDeque<u32>) -> Result<Self, TraceParsingError> {
+        // Keep track of the current peak index
+        let mut peak_words = 0;
+
+        let state = {
+            let flags = if let Some(word) = stream.get(peak_words) {
+                peak_words += 1;
+                IscPoolFlags::from_bits(*word)
+            } else {
+                return Err(TraceParsingError::EmptyStream);
+            };
+            let wr_lock = if let Some(word) = stream.get(peak_words) {
+                peak_words += 1;
+                *word
+            } else {
+                return Err(TraceParsingError::EmptyStream);
+            };
+            let rd_lock = if let Some(word) = stream.get(peak_words) {
+                peak_words += 1;
+                *word
+            } else {
+                return Err(TraceParsingError::EmptyStream);
+            };
+            let issue_lock = if let Some(word) = stream.get(peak_words) {
+                peak_words += 1;
+                *word
+            } else {
+                return Err(TraceParsingError::EmptyStream);
+            };
+            let sync_id = if let Some(word) = stream.get(peak_words) {
+                peak_words += 1;
+                *word
+            } else {
+                return Err(TraceParsingError::EmptyStream);
+            };
+
+            IscPoolState {
+                flags,
+                wr_lock,
+                rd_lock,
+                issue_lock,
+                sync_id,
+            }
+        };
+        let insn = if let Some(word) = stream.get(peak_words) {
+            peak_words += 1;
+            *word
+        } else {
+            return Err(TraceParsingError::EmptyStream);
+        };
+
+        let timestamp = if let Some(word) = stream.get(peak_words) {
+            peak_words += 1;
+            *word
+        } else {
+            return Err(TraceParsingError::EmptyStream);
+        };
+
+        Ok(Self {
+            state,
+            insn,
+            timestamp,
+        })
+    }
+
+    pub fn to_words(&self) -> Vec<u32> {
+        let mut words = Vec::new();
+
+        words.push(self.state.flags.0);
+        words.push(self.state.wr_lock);
+        words.push(self.state.rd_lock);
+        words.push(self.state.issue_lock);
+        words.push(self.state.sync_id);
+        words.push(self.insn);
+        words.push(self.timestamp);
+        words
     }
 }

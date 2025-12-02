@@ -177,6 +177,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitfield-struct"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8769c4854c5ada2852ddf6fd09d15cf43d4c2aaeccb4de6432f5402f08a6003b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,6 +835,7 @@ dependencies = [
 name = "hpu_sim"
 version = "0.1.0"
 dependencies = [
+ "bitfield-struct 0.12.1",
  "bytemuck",
  "clap",
  "hpuc_sim",
@@ -2192,7 +2204,7 @@ name = "tfhe-hpu-backend"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "bitfield-struct",
+ "bitfield-struct 0.10.1",
  "bitflags",
  "bytemuck",
  "crossbeam",

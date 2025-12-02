@@ -10,9 +10,11 @@ use ra2m::prelude::{protocol::membus::MemBus, *};
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
-use super::{DOpState, DOpPayload};
+use super::{DOpState, DOpPayload, IscPoolFlags, IscPoolState, IscTrace};
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
+
+use hpu_asm::ToHex;
 
 /// HpuCore parameters
 #[derive(Debug, Clone)]
@@ -61,6 +63,10 @@ struct HpuCoreInner {
     /// Keep track of DOpPayload for later behav execution
     dop_map: HashMap<hpu_sim::DOpId, DOpPayload>,
 
+    /// Keep track of trace offset
+    /// Trace memory is written word by word in a wrapping manner
+    trace_offset: usize,
+
     
     /// Tfhe server keys
     /// Read from memory after bsk_avail/ksk_avail register are set
@@ -83,8 +89,12 @@ impl HpuCoreInner {
         let sim_event = HpuEventStore::new(ra2m_clk_d);
         let sim_tracer = Tracer::new();
         let dop_map = HashMap::new();
+        let trace_offset = match params.trace_pc {
+            MemKind::Ddr { offset } => offset,
+            MemKind::Hbm { pc } => params.hbm_global_ofst + pc * params.hbm_pc_ofst,
+        };
 
-        Self { regfile, pc: 0, sim_model, sim_event, sim_tracer, dop_map, sks: None}
+        Self { regfile, pc: 0, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
     }
 }
 
@@ -167,7 +177,7 @@ impl HpuCore {
 
         }
     }
-    async fn simulate_inner(self: Arc<Self>) {
+    async fn simulate_inner(self: Arc<Self>) -> ! {
         {
             let mut inner = self.inner.lock().unwrap();
             let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer,..}= *inner;
@@ -182,7 +192,7 @@ impl HpuCore {
             }{
                 // Wait for real simulation to match sim_model
                 delay::Delay::wait_until(self.props.clock_domain().into_tick(trigger.at.0.cycles())).await;
-                let (exec_dop_id, retire_dop) =  
+                let (exec_dop_id, retire_dop, trace_words) =  
                 {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map,..}= *inner;
@@ -197,17 +207,24 @@ impl HpuCore {
                     sim_model.handle(sim_event, trigger);
 
                     // Apply event side effect in hpu_core
+                    // And forge trace paquet if any
+                    // local function to prevent code duplication
+                    fn trace_from_id(sim_model: &hpu_sim::Hpu, dop_id: hpu_sim::DOpId, insn: u32, timestamp: u32) -> IscTrace {
+                                let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
+                                IscTrace{ state: IscPoolState{ flags: IscPoolFlags::new().with_pdg(props.pdg).with_rd_pdg(props.rd_pdg).with_vld(props.vld), wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn, timestamp}
+                    }
 
                     match hpuc_event {
                         hpu_sim::Events::IscRefillDOp(dop) => {
-                            let dop = dop_map.get_mut(&dop.id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop.id));
+                            let dop_id = dop.id;
+                            let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop.id));
                             dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Refill));
-                            (None, None)
+                            (None, None, trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
                         },
                         hpu_sim::Events::IscUnlockIssue(dop_id) => {
                             let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
                             dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Issue));
-                            (None, None)
+                            (None, None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
                         },
                         hpu_sim::Events::IscUnlockRead(dop_id) => {
                             //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
@@ -218,19 +235,21 @@ impl HpuCore {
                             // stage
                             let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
                             dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::RdUnlock));
-                            (Some(dop_id), None)
+                            (Some(dop_id), None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
                         },
                         hpu_sim::Events::IscUnlockWrite(dop_id) => {
                             let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
                             dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::WrUnlock));
-                            (None, None)
+                            (None, None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
                         },
                         hpu_sim::Events::IscRetireDOp(dop) => {
-                            let mut dop = dop_map.remove(&dop.id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}",dop.id));
+                            let dop_id = dop.id;
+                            let mut dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}",dop.id));
+                            let dop_hex = dop.inner.to_hex();
                             dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Retire));
-                            (None, Some(dop))
+                            (None, Some(dop), trace_from_id(sim_model, dop_id, dop_hex, usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
                         },
-                        _ => {(None, None)},
+                        _ => {(None, None,  vec![])}
                     }
                 };
 
@@ -242,6 +261,20 @@ impl HpuCore {
                 // Deferred retired
                 if let Some(dop) = retire_dop {
                     self.retire(dop).await.expect("Error with DOp retire");
+                }
+                // Deferred trace generation in trace_memory
+                if 0 != trace_words.len() {
+                    // Update trace_offset for next round
+                    let addr = {
+                        let mut inner = self.inner.lock().unwrap();
+                        let addr = inner.trace_offset;
+                        inner.trace_offset += std::mem::size_of::<u32>();
+                        addr
+                        };
+                self.mem
+                    .write(self.properties(), addr, &trace_words)
+                    .await
+                    .expect("Error while writing trace memory");
                 }
             } else {
                event::Event::wait(&forge_event_name!(|self| "SimInnerPushDOp")).await;
