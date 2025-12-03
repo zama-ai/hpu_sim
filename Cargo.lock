@@ -838,6 +838,7 @@ dependencies = [
  "bitfield-struct 0.12.1",
  "bytemuck",
  "clap",
+ "hpuc_langs",
  "hpuc_sim",
  "itertools 0.14.0",
  "ra2m",
@@ -846,9 +847,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "hpuc_ir"
+version = "0.1.0"
+dependencies = [
+ "hpuc_utils",
+]
+
+[[package]]
+name = "hpuc_langs"
+version = "0.1.0"
+dependencies = [
+ "hpuc_ir",
+ "hpuc_utils",
+ "serde",
+]
+
+[[package]]
 name = "hpuc_sim"
 version = "0.1.0"
 dependencies = [
+ "hpuc_langs",
  "hpuc_utils",
  "serde",
  "serde_json",

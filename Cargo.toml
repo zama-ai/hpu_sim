@@ -29,6 +29,7 @@ debug-assertions = false
 ra2m = {path="../ra2m", features = []}
 tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 hpuc_sim = { path = "../hpu_compiler/hpuc_sim"}
+hpuc_langs = { path = "../hpu_compiler/hpuc_langs"}
 clap = { version = "=4.5.30", features = ["derive"] }
 bytemuck = "1.23.2"
 serde = { version = "1", features = ["derive"] }

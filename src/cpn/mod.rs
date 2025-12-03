@@ -4,7 +4,7 @@ use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
 pub mod hpu_core;
-pub use hpu_core::{HpuCore, HpuCoreParams};
+pub use hpu_core::{HpuCore, HpuCoreParams, IscCommand};
 pub mod hpu_node;
 pub use hpu_node::{HpuNode, HpuNodeParams};
 pub mod hpu_cluster;
@@ -23,21 +23,11 @@ pub const MEM_CT_PC_MAX: usize = 2;
 pub const HBM_BSK_PC_MAX: usize = 16;
 pub const HBM_KSK_PC_MAX: usize = 16;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Clone, Default)]
-pub enum DOpState {
-    #[default]
-    Refill,
-    Issue,
-    RdUnlock,
-    WrUnlock,
-    Retire,
-}
-
 //Common type use as cpn interface.
 // Thin wrapper around tfhe_hpu_backend type with extra trait for simulation logging/tracing
 #[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
 #[history(trace)]
-#[trace_custom(DOpState)]
+#[trace_custom(IscCommand)]
 pub struct DOpPayload {
     inner: hpu_asm::DOp,
 
@@ -48,7 +38,7 @@ pub struct DOpPayload {
 
     /// Contain history of the handling information of a given access through its route across the
     /// architecture (From the requester up to the responder and back for acknowledgement)
-    trace: types::History<DOpState>,
+    trace: types::History<IscCommand>,
 }
 
 impl DOpPayload {
@@ -82,7 +72,7 @@ pub struct IscTrace {
     timestamp: u32,
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct IscPoolState {
     flags: IscPoolFlags,
     wr_lock: u32,

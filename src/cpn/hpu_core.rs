@@ -1,16 +1,17 @@
 //! Depict Hpu computation core
 
 use hpuc_sim::hpu as hpu_sim;
+pub use hpu_sim::IscCommand;
+use hpuc_langs;
 use hpuc_sim::{Simulatable, Dispatch, Tracer};
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
-use ra2m::prelude::protocol::membus::Command;
 use ra2m::prelude::types::ClockDomain;
-use ra2m::prelude::{protocol::membus::MemBus, *};
+use ra2m::prelude::{protocol::membus, *};
 
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
-use super::{DOpState, DOpPayload, IscPoolFlags, IscPoolState, IscTrace};
+use super::{DOpPayload, IscPoolFlags, IscPoolState, IscTrace};
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -93,7 +94,6 @@ impl HpuCoreInner {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { pc } => params.hbm_global_ofst + pc * params.hbm_pc_ofst,
         };
-
         Self { regfile, pc: 0, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
     }
 }
@@ -105,7 +105,7 @@ pub struct HpuCore {
 
     /// mem: Key and ciphertext
     #[port]
-    mem: port::ReqRespPort<MemBus>,
+    mem: port::ReqRespPort<membus::MemBus>,
 
     /// req: Received DOp request
     #[port]
@@ -186,96 +186,96 @@ impl HpuCore {
         }
 
         loop {
-            if let Some(trigger) = {
+            // Pop next batch if any
+            let batch_trigger = {
                 let mut inner = self.inner.lock().unwrap();
-                inner.sim_event.triggers.pop()
-            }{
+                inner.sim_event.pop_batch()
+            };
+
+            if !batch_trigger.is_empty(){
                 // Wait for real simulation to match sim_model
-                delay::Delay::wait_until(self.props.clock_domain().into_tick(trigger.at.0.cycles())).await;
-                let (exec_dop_id, retire_dop, trace_words) =  
-                {
+                delay::Delay::wait_until(self.props.clock_domain().into_tick(batch_trigger[0].at.0.cycles())).await;
+
+                // Apply all trigger to sim_model
+                for trigger in batch_trigger.iter() {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map,..}= *inner;
                     // Handle event in inner hpuc simulation model
                     if self.params.sim_trace {
                         sim_tracer.add_event(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), &trigger.event);
                     }
-
-                    // Clone events for side effect handling
-                    // hpuc_sim consume the event but side effect are async and couldn't be start while keeping the inner lock
-                    let hpuc_event = trigger.event.clone();
-                    sim_model.handle(sim_event, trigger);
-
-                    // Apply event side effect in hpu_core
-                    // And forge trace paquet if any
-                    // local function to prevent code duplication
-                    fn trace_from_id(sim_model: &hpu_sim::Hpu, dop_id: hpu_sim::DOpId, insn: u32, timestamp: u32) -> IscTrace {
-                                let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
-                                IscTrace{ state: IscPoolState{ flags: IscPoolFlags::new().with_pdg(props.pdg).with_rd_pdg(props.rd_pdg).with_vld(props.vld), wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn, timestamp}
-                    }
-
-                    match hpuc_event {
-                        hpu_sim::Events::IscRefillDOp(dop) => {
-                            let dop_id = dop.id;
-                            let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop.id));
-                            dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Refill));
-                            (None, None, trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
-                        },
-                        hpu_sim::Events::IscUnlockIssue(dop_id) => {
-                            let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
-                            dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Issue));
-                            (None, None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
-                        },
-                        hpu_sim::Events::IscUnlockRead(dop_id) => {
-                            //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
-                            // to clutter the source operands. The dst register is then available in
-                            // advance, but not used before it's real availability due to wr_lock.
-                            // -> Another option would have been to buffer the source operands. However, due to the
-                            // operands size, we had preferred to move the behavioral execution at the rd_unlock
-                            // stage
-                            let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
-                            dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::RdUnlock));
-                            (Some(dop_id), None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
-                        },
-                        hpu_sim::Events::IscUnlockWrite(dop_id) => {
-                            let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {dop_id}"));
-                            dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::WrUnlock));
-                            (None, None,  trace_from_id(sim_model, dop_id, dop.inner.to_hex(), usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
-                        },
-                        hpu_sim::Events::IscRetireDOp(dop) => {
-                            let dop_id = dop.id;
-                            let mut dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}",dop.id));
-                            let dop_hex = dop.inner.to_hex();
-                            dop.append_handler(types::Handler::custom(*self.props.uid(), DOpState::Retire));
-                            (None, Some(dop), trace_from_id(sim_model, dop_id, dop_hex, usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32).to_words())
-                        },
-                        _ => {(None, None,  vec![])}
-                    }
-                };
-
-                // Deferred execution
-                if let Some(dop_id) = exec_dop_id {
-                    self.exec(dop_id).await.expect("Error with DOp execution")
+                    sim_model.handle(sim_event, trigger.clone());
                 }
 
-                // Deferred retired
-                if let Some(dop) = retire_dop {
-                    self.retire(dop).await.expect("Error with DOp retire");
-                }
-                // Deferred trace generation in trace_memory
-                if 0 != trace_words.len() {
-                    // Update trace_offset for next round
-                    let addr = {
+                // Hook back side effects in main simulation
+                // NB: use to deffered queue for async tasks. Ease handling of inner mutex
+                let mut deferred_exec = Vec::new();
+                let mut deferred_retire = Vec::new();
+                let mut deferred_trace = Vec::new();
+                for trigger in batch_trigger.into_iter().filter(|hpuc_sim::Trigger{ at, event }| matches!(event, hpu_sim::Events::IscNotify(_,_))) {
                         let mut inner = self.inner.lock().unwrap();
-                        let addr = inner.trace_offset;
-                        inner.trace_offset += std::mem::size_of::<u32>();
-                        addr
-                        };
-                self.mem
-                    .write(self.properties(), addr, &trace_words)
-                    .await
-                    .expect("Error while writing trace memory");
-                }
+                        let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map,..}= *inner;
+
+                        match trigger.event {
+                            hpu_sim::Events::IscNotify(dop_id, cmd) => {
+                                // Retrieved HpuDop from id
+                                let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
+                                dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
+
+                                // Append Hw trace data to deferred list
+                                if let Some(props) = sim_model.scheduler.get_slot_properties(dop_id) {
+                                    let trace = IscTrace{ state: IscPoolState{ flags: IscPoolFlags::new().with_pdg(props.pdg).with_rd_pdg(props.rd_pdg).with_vld(props.vld).with_state(props.state as u8), wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn: dop.inner.to_hex(), timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
+                                    // TODO cleanup
+                                    println!("[{dop_id}]{props:?}");
+                                    println!("[{dop_id}]{trace:?}");
+                                    deferred_trace.extend(trace.to_words());
+                                }
+
+                                // Register Deferred task if any
+                                match cmd {
+                                    IscCommand::RdUnlock => {
+                                        //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
+                                        // to clutter the source operands. The dst register is then available in
+                                        // advance, but not used before it's real availability due to wr_lock.
+                                        // -> Another option would have been to buffer the source operands. However, due to the
+                                        // operands size, we had preferred to move the behavioral execution at the rd_unlock
+                                        // stage
+                                        deferred_exec.push(dop_id);
+                                    },
+                                    IscCommand::Retire => {
+                                        let dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Tried to retired unknown DOpId {}", dop_id));
+                                        deferred_retire.push(dop);
+                                    },
+                                    _ => {/*Nothing to do is other cases */}
+                                }
+                                },
+                                _ => unreachable!("Error with previous filtering"),
+                        }
+                    }
+
+                    // Deferred execution
+                    for dop_id in deferred_exec.into_iter() {
+                        self.exec(dop_id).await.expect("Error with DOp execution")
+                    }
+
+                    // Deferred retired
+                    for dop in deferred_retire.into_iter() {
+                        self.retire(dop).await.expect("Error with DOp retire");
+                    }
+                    // Deferred trace generation in trace_memory
+                    if 0 != deferred_trace.len() {
+                        // Update trace_offset for next round
+                        let addr = {
+                            let mut inner = self.inner.lock().unwrap();
+                            let addr = inner.trace_offset;
+                            inner.trace_offset += std::mem::size_of::<u32>()* deferred_trace.len();
+                            addr
+                            };
+                        self.mem
+                            .write(self.properties(), addr, &deferred_trace)
+                            .await
+                            .expect("Error while writing trace memory");
+                    }
             } else {
                event::Event::wait(&forge_event_name!(|self| "SimInnerPushDOp")).await;
             }
@@ -352,7 +352,7 @@ impl HpuCore {
                 // -> Use burst instead of two separate requests
                 let mut ct_mem = Vec::new();
                 let mem_req= self.cid_to_addr(cid_ofst).into_iter().map(|addr| 
-                    MemBus::new_wrapped(self.props.uid(), Command::Read, addr, self.ct_pc_pattern(),None, None)
+                    membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read, addr, self.ct_pc_pattern(),None, None)
                 ).collect::<Vec<_>>();
 
                 for req in mem_req.into_iter() {
@@ -411,9 +411,9 @@ impl HpuCore {
                 ) {
                     let data_u8 = bytemuck::cast_slice::<u64, u8>(hpu_slice);
 
-                    let mem_req = MemBus::new_wrapped(
+                    let mem_req = membus::MemBus::new_wrapped(
                         self.props.uid(),
-                         Command::Write,
+                         membus::Command::Write,
                         addr,
                         Pattern::Simple(data_u8.len().Byte()), // Only write used data, not the memory used for padding
                         Some(data_u8),
@@ -851,7 +851,7 @@ impl HpuCore {
                         // };
 
                         // Issue read request
-                        let mem_req = MemBus::new_wrapped(self.props.uid(), Command::Read,
+                        let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
                                 addr,
                                         Pattern::Simple(hpu_u8.len().Byte()),None, None);
 
@@ -883,7 +883,7 @@ impl HpuCore {
                         // };
 
                         // Issue read request
-                        let mem_req = MemBus::new_wrapped(self.props.uid(), Command::Read,
+                        let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
                                 addr,
                                         Pattern::Simple(hpu_u8.len().Byte()),None, None);
 
@@ -1036,6 +1036,24 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
             triggers: BinaryHeap::new()
         }
     }
+
+    fn pop_batch(&mut self) -> Vec<hpuc_sim::Trigger<E>> {
+      let mut batch = Vec::new();
+
+    // Pop first event and all subsequent Ord::Equal events
+    if let Some(first) = self.triggers.pop() {
+        // Keep popping while the next top is equal according to Ord
+        while let Some(next) = self.triggers.peek() {
+            if next.cmp(&first) == std::cmp::Ordering::Equal {
+                batch.push(self.triggers.pop().unwrap());
+            } else {
+                break;
+            }
+        }
+        batch.push(first);
+    }
+    batch
+    }
 }
 
 impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
@@ -1065,86 +1083,88 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
 // Convert tfhe-rs::DOp in hpuc_sim::DOp
 // Required current hpu_core context for DOpId extraction
 fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp{
-    use hpu_sim::{DOp, DOpId, RawDOp, Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
+    use hpuc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
+    use hpu_sim::{DOp, DOpId, RawDOp};
+
     let id = DOpId(pc);
     let raw = match asm_dop {
         hpu_asm::DOp::ADD(inner) => RawDOp::ADD{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::Register{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::Register{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
+            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
 
         },
         hpu_asm::DOp::SUB(inner) => RawDOp::SUB{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::Register{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::Register{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
+            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
             },
         hpu_asm::DOp::MAC(inner) => RawDOp::MAC{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::Register{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::Register{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
-            cst: Argument::Immediate{val: inner.0.mul_factor.0 as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
+            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
+            cst: Argument::PtConst{val: inner.0.mul_factor.0 as usize},
         },
         hpu_asm::DOp::ADDS(inner) => RawDOp::ADDS{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::Immediate { val: inner.0.msg_cst.unwrap_cst() as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
         },
         hpu_asm::DOp::SUBS(inner) => RawDOp::SUBS{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::Immediate { val: inner.0.msg_cst.unwrap_cst() as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
         },
         hpu_asm::DOp::SSUB(inner) => RawDOp::SSUB{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::Immediate { val: inner.0.msg_cst.unwrap_cst() as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
         },
         hpu_asm::DOp::MULS(inner) => RawDOp::MULS{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::Immediate { val: inner.0.msg_cst.unwrap_cst() as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
         },
         hpu_asm::DOp::LD(inner) => RawDOp::LD{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
-            src: Argument::Memory{addr: inner.0.slot.unwrap_addr() as usize}
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
+            src: Argument::CtIo{addr: inner.0.slot.unwrap_addr() as usize}
         },
         hpu_asm::DOp::ST(inner) => RawDOp::ST{
-            dst: Argument::Memory{addr: inner.0.slot.unwrap_addr() as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
+            dst: Argument::CtIo{addr: inner.0.slot.unwrap_addr() as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
         },
         hpu_asm::DOp::SYNC(_inner) => RawDOp::SYNC,
         hpu_asm::DOp::PBS(inner) => RawDOp::PBS{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_F(inner) => RawDOp::PBS_F{
-            dst: Argument::Register{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML2(inner) => RawDOp::PBS_ML2{
-            dst: Argument::Register{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML2_F(inner) => RawDOp::PBS_ML2_F{
-            dst: Argument::Register{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML4(inner) => RawDOp::PBS_ML4{
-            dst: Argument::Register{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML4_F(inner) => RawDOp::PBS_ML4_F{
-            dst: Argument::Register{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML8(inner) => RawDOp::PBS_ML8{
-            dst: Argument::Register{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::PBS_ML8_F(inner) => RawDOp::PBS_ML8_F{
-            dst: Argument::Register{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::Register{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
+            dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
+            src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
         },
         hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_)=> {
             panic!("Error: DOp {asm_dop:?} must have been handled by Ucore")
