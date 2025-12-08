@@ -11,7 +11,7 @@ use ra2m::prelude::{protocol::membus, *};
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
-use super::{DOpPayload, IscPoolFlags, IscPoolState, IscTrace};
+use super::DOpPayload;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -92,7 +92,11 @@ impl HpuCoreInner {
         let dop_map = HashMap::new();
         let trace_offset = match params.trace_pc {
             MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { pc } => params.hbm_global_ofst + pc * params.hbm_pc_ofst,
+            MemKind::Hbm { pc } => {
+                let addr = params.hbm_global_ofst + pc * params.hbm_pc_ofst;
+                println!("TRACE[{pc}] => {addr:x}");
+                params.hbm_global_ofst + pc * params.hbm_pc_ofst
+            },
         };
         Self { regfile, pc: 0, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
     }
@@ -212,9 +216,9 @@ impl HpuCore {
                 let mut deferred_exec = Vec::new();
                 let mut deferred_retire = Vec::new();
                 let mut deferred_trace = Vec::new();
-                for trigger in batch_trigger.into_iter().filter(|hpuc_sim::Trigger{ at, event }| matches!(event, hpu_sim::Events::IscNotify(_,_))) {
+                for trigger in batch_trigger.into_iter().filter(|hpuc_sim::Trigger{ event, .. }| matches!(event, hpu_sim::Events::IscNotify(_,_))) {
                         let mut inner = self.inner.lock().unwrap();
-                        let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map,..}= *inner;
+                        let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
 
                         match trigger.event {
                             hpu_sim::Events::IscNotify(dop_id, cmd) => {
@@ -224,11 +228,14 @@ impl HpuCore {
 
                                 // Append Hw trace data to deferred list
                                 if let Some(props) = sim_model.scheduler.get_slot_properties(dop_id) {
-                                    let trace = IscTrace{ state: IscPoolState{ flags: IscPoolFlags::new().with_pdg(props.pdg).with_rd_pdg(props.rd_pdg).with_vld(props.vld).with_state(props.state as u8), wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn: dop.inner.to_hex(), timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
-                                    // TODO cleanup
-                                    println!("[{dop_id}]{props:?}");
-                                    println!("[{dop_id}]{trace:?}");
-                                    deferred_trace.extend(trace.to_words());
+                                    let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
+                                        IscCommand::None => isc_trace::IscCommand::None,
+                                        IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
+                                        IscCommand::Retire => isc_trace::IscCommand::Retire,
+                                        IscCommand::Refill => isc_trace::IscCommand::Refill,
+                                        IscCommand::Issue => isc_trace::IscCommand::Issue,
+                                    }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn: dop.inner.to_hex(), timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
+                                    deferred_trace.extend(trace.into_bytes());
                                 }
 
                                 // Register Deferred task if any
@@ -268,11 +275,12 @@ impl HpuCore {
                         let addr = {
                             let mut inner = self.inner.lock().unwrap();
                             let addr = inner.trace_offset;
-                            inner.trace_offset += std::mem::size_of::<u32>()* deferred_trace.len();
+                            inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
                             addr
                             };
+                        println!("@{addr:x}::{deferred_trace:?}"); 
                         self.mem
-                            .write(self.properties(), addr, &deferred_trace)
+                            .write_bytes(self.properties(), addr, &deferred_trace)
                             .await
                             .expect("Error while writing trace memory");
                     }
