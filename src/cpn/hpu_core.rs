@@ -222,21 +222,24 @@ impl HpuCore {
 
                         match trigger.event {
                             hpu_sim::Events::IscNotify(dop_id, cmd) => {
+                                match cmd {
+                                    IscCommand::Retire => println!("Received Notify Retire"),
+                                    _ => {},
+                                }
                                 // Retrieved HpuDop from id
                                 let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
-                                dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
+                                dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
 
                                 // Append Hw trace data to deferred list
-                                if let Some(props) = sim_model.scheduler.get_slot_properties(dop_id) {
-                                    let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
-                                        IscCommand::None => isc_trace::IscCommand::None,
-                                        IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
-                                        IscCommand::Retire => isc_trace::IscCommand::Retire,
-                                        IscCommand::Refill => isc_trace::IscCommand::Refill,
-                                        IscCommand::Issue => isc_trace::IscCommand::Issue,
-                                    }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn: dop.inner.to_hex(), timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
-                                    deferred_trace.extend(trace.into_bytes());
-                                }
+                                let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
+                                let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
+                                    IscCommand::None => isc_trace::IscCommand::None,
+                                    IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
+                                    IscCommand::Retire => isc_trace::IscCommand::Retire,
+                                    IscCommand::Refill => isc_trace::IscCommand::Refill,
+                                    IscCommand::Issue => isc_trace::IscCommand::Issue,
+                                }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn_hex: dop.inner.to_hex(), insn_asm: None, timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
+                                deferred_trace.extend(trace.into_bytes());
 
                                 // Register Deferred task if any
                                 match cmd {
@@ -278,7 +281,6 @@ impl HpuCore {
                             inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
                             addr
                             };
-                        println!("@{addr:x}::{deferred_trace:?}"); 
                         self.mem
                             .write_bytes(self.properties(), addr, &deferred_trace)
                             .await
