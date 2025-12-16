@@ -5,10 +5,7 @@ use ra2m::prelude::{
     protocol::{addr::{Addr, Pattern}, dma::DmaBus, membus::MemBus, network::Network},
     *,
 };
-use tfhe::tfhe_hpu_backend::{
-    asm::ToHex,
-    prelude::*,
-};
+use tfhe::tfhe_hpu_backend::{asm::ToHex, prelude::*};
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -20,7 +17,6 @@ use super::DOpPayload;
 /// UCore parameters
 #[derive(Debug, Clone)]
 pub struct UCoreParams {
-    pub node_id: u8,
     pub cluster_nodes: Vec<u8>,
     pub fw_pc: MemKind,
 
@@ -49,8 +45,9 @@ pub struct UCoreParams {
 
 /// Store internal state of UCore module
 struct UCoreInner {
+    config: UcoreConfig,
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
-    iop_pdg: VecDeque<hpu_asm::IOp>,
+    iop_pdg: VecDeque<(time::Tick, hpu_asm::IOp)>,
     event_list: HashMap<UcoreHash, Event>,
     b2b_pool: B2bPool,
     dst_ldq: Vec<DstLdOrder>,
@@ -61,6 +58,7 @@ struct UCoreInner {
 impl UCoreInner {
     pub fn new() -> Self {
         Self {
+            config: UcoreConfig::new(Default::default()),
             iop_stream: VecDeque::new(),
             iop_pdg: VecDeque::new(),
             event_list: HashMap::new(),
@@ -331,24 +329,31 @@ impl UCore {
                 let dop_hex = dop.inner.to_hex();
 
                 // TODO Store IID in IOp Ack instead ?
-                let iop= self.inner.lock().unwrap().iop_pdg.pop_front().expect("Received IOp Ack without IOp pending");
+                let (hid, iop) = {
+                    let mut inner = self.inner.lock().unwrap();
+                    let hid = inner.config.node_id;
+                    let (start_tick, iop) = inner.iop_pdg.pop_front().expect("Received IOp Ack without IOp pending");
+                    let dur_time = unit::Time::from(cur_tick() - start_tick).rescale();
+                    println!("Exec report for {iop} [{dur_time}]");
+                    (hid, iop)
+                };
                 self.clone().flush_dst_ldq(iop.get_iid()).await
                     .expect("Error while flush Dst Store queue");
 
                 // Notify Other HpuNode of dst availability
-                let notify_order = iop.dst().iter().filter(|op|  op.props.pos.0 == self.params.node_id).flat_map(|op| {
+                let notify_order = iop.dst().iter().filter(|op|  op.props.pos.0 == hid).flat_map(|op| {
                            let vec_len = op.props.vec_size.len();
                            let blk_len= op.props.block.len();
                            itertools::iproduct!(0..vec_len, 0..blk_len).map(|(v,b)| v*blk_len + b).flat_map(|bid| {
                                  let ucore_pld = hpu_asm::UcorePayload {
                                     mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag{ pos: op.props.pos, slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16)}),
                                     slot: None,
-                                    from_hid: hpu_asm::NodeId(self.params.node_id),
+                                    from_hid: hpu_asm::NodeId(hid),
                                     iid: op.props.iid,
                                 };
 
-                                self.params.cluster_nodes.iter().filter(|n| **n != self.params.node_id).map(|n| {
-                                    Network::new_wrapped(self.params.node_id, *n, ucore_pld, None)
+                                self.params.cluster_nodes.iter().filter(|n| **n != hid).map(|n| {
+                                    Network::new_wrapped(hid, *n, ucore_pld, None)
                                 }).collect::<Vec<_>>()
                        }).collect::<Vec<_>>()
                 }).collect::<Vec<_>>();
@@ -413,7 +418,7 @@ impl UCore {
                    //  * Sync received from hpu_core
                    //  *  Forward to host
                    for operand in iop.dst().iter() {
-                       if operand.props.pos.0 == self.params.node_id {
+                       if operand.props.pos.0 == inner.config.node_id {
                            let vec_len = operand.props.vec_size.len();
                            let blk_len= operand.props.block.len();
 
@@ -430,7 +435,7 @@ impl UCore {
                    }
 
                    inner.cur_iid = iop.get_iid();
-                   inner.iop_pdg.push_back(iop.clone());
+                   inner.iop_pdg.push_back((cur_tick(), iop.clone()));
                    event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
                 }
 
@@ -529,13 +534,34 @@ impl UCore {
 
     /// Read DOp stream from Firmware memory
     async fn load_fw(&self, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
-        let hid = self.params.node_id;
-
         let fw_base_addr = match self.params.fw_pc {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
                 panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
             }
+        };
+        let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD*std::mem::size_of::<u32>();
+
+
+        // Read config from runtime config area
+        // Update inner config and extract hid
+        let hid ={
+            let fw_cfg_raw = self
+            .mem
+            .read_bytes(
+                self.properties(),
+                fw_base_addr,
+                std::mem::size_of::<UcoreConfig>(),
+            )
+            .await
+            .expect("Error while reading fw config");
+
+            let fw_cfg = *bytemuck::from_bytes(fw_cfg_raw.as_slice());
+
+            let mut inner = self.inner.lock().unwrap();
+            inner.config = fw_cfg;
+
+            inner.config.node_id
         };
 
         let dop_ofst = {
@@ -543,7 +569,7 @@ impl UCore {
             self.mem
                 .read(
                     self.properties(),
-                    fw_base_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hid)),
+                    fw_lut_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hid)),
                     &mut val,
                 )
                 .await
@@ -555,7 +581,7 @@ impl UCore {
             self.mem
                 .read(
                     self.properties(),
-                    fw_base_addr + dop_ofst as usize,
+                    fw_lut_addr + dop_ofst as usize,
                     &mut val,
                 )
                 .await
@@ -566,7 +592,7 @@ impl UCore {
             .mem
             .read_bytes(
                 self.properties(),
-                fw_base_addr + dop_ofst + std::mem::size_of::<u32>(),
+                fw_lut_addr + dop_ofst + std::mem::size_of::<u32>(),
                 dop_len,
             )
             .await
@@ -605,7 +631,7 @@ impl UCore {
 
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
-                    let from_hid = hpu_asm::NodeId(self.params.node_id);
+                    let from_hid = hpu_asm::NodeId(self.inner.lock().unwrap().config.node_id);
                     let to_hid = inner.hid;
 
                     let ucore_pld = hpu_asm::UcorePayload{ mode: hpu_asm::UcorePayloadMode::User(inner.flag), slot: Some(raw_cid), from_hid, iid: iop.get_iid()};
@@ -673,7 +699,7 @@ impl UCore {
                                     let op_cid =hpu_asm::CtId(
                                             operand.addr.base_cid.0 + bid as u16,
                                         ); 
-                                    if operand.props.pos.0 == self.params.node_id {
+                                    if operand.props.pos.0 == self.inner.lock().unwrap().config.node_id {
                                         // Local access -> Usual patching
                                         hpu_asm::MemId::Addr(op_cid)
                                     } else {
@@ -691,7 +717,7 @@ impl UCore {
                                     let cid = hpu_asm::CtId(
                                         operand.addr.base_cid.0 + bid as u16);
 
-                                    let op_cid = if operand.props.pos.0 == self.params.node_id {
+                                    let op_cid = if operand.props.pos.0 == inner.config.node_id {
                                         // Local access -> Usual patching
                                         // Also removed associated DstLdOrder in the queue
                                         if let Some(i) = inner.dst_ldq.iter().enumerate().filter(|(_i, x)| {
@@ -786,9 +812,9 @@ impl UCore {
         dst: Option<hpu_asm::CtId>,
     ) -> Result<hpu_asm::MemId, anyhow::Error> {
         loop {
-            let  event = {
+            let  (hid, event) = {
                 let inner = self.inner.lock().unwrap();
-                inner.event_list.get(&hash).cloned()
+                (inner.config.node_id, inner.event_list.get(&hash).cloned())
             };
 
             log!(|self| log::Category::Own, log::Verbosity::Debug => hash, event);
@@ -810,7 +836,7 @@ impl UCore {
                     let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter()).map(|(src,dst)| 
                             DmaBus::new_wrapped(
                                 (payload.from_hid.0, src),
-                                (self.params.node_id, dst),
+                                (hid, dst),
                                 self.ct_pc_pattern(),
                                 None,
                             )).collect::<Vec<_>>();
@@ -848,13 +874,13 @@ impl UCore {
     async fn flush_dst_ldq(self: Arc<Self>, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
         //1. Filter out all read request that belong to current iop
         // Store back unmatch DstRdOrder in queue
-        let mut cur_ord = {
+        let (hid, mut cur_ord) = {
             let mut inner = self.inner.lock().unwrap();
             let remains_elem = inner
                 .dst_ldq
                 .iter_mut()
                 .partition_in_place(|e| e.iid != for_iid);
-             inner.dst_ldq.split_off(remains_elem)
+             (inner.config.node_id, inner.dst_ldq.split_off(remains_elem))
          };
 
         // 2. Execute DstLdOrder
@@ -875,12 +901,12 @@ impl UCore {
              let ucore_pld = hpu_asm::UcorePayload {
                 mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag{ pos: order.operand.props.pos, slot: order.cid}),
                 slot: Some(slot),
-                from_hid: hpu_asm::NodeId(self.params.node_id),
+                from_hid: hpu_asm::NodeId(hid),
                 iid: order.iid,
             };
 
             // Notify owner HpuNode 
-            Network::new_wrapped(self.params.node_id, order.operand.props.pos.0, ucore_pld, None)
+            Network::new_wrapped(hid, order.operand.props.pos.0, ucore_pld, None)
         })
             .collect::<Vec<_>>();
 
@@ -918,7 +944,7 @@ impl UCore {
         if let Some(event) = present {
             panic!(
                 "Ucore {}: Received duplicated event @{hash:?} => {event:?}",
-                self.params.node_id
+                inner.config.node_id
             );
         }
         // Notify to wake up pending task

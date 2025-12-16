@@ -52,6 +52,12 @@ impl DOpPayload {
     }
 }
 
+impl std::fmt::Display for DOpPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DOpPayload {} [{}]", self.asm_view, self.trace)
+    }
+}
+
 impl TxStatus for DOpPayload {
     fn tx_check(&self) -> Result<(), anyhow::Error> {
         Ok(())

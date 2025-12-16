@@ -31,7 +31,7 @@ pub struct Args {
     #[clap(
         long,
         value_parser,
-        default_value = "${HPU_SIM_DIR}/params/gaussian_64b_fast.toml"
+        default_value = "${HPU_SIM_DIR}/params/tuniform_64b_pfail128_psi64.toml"
     )]
     pub params: ShellString,
 
@@ -82,7 +82,7 @@ pub struct Args {
 
     /// Frequency
     /// Only use for report display
-    #[clap(long, value_parser, default_value = "350_MHz")]
+    #[clap(long, value_parser, default_value = "400_MHz")]
     frequency: unit::Frequency,
 
     // Log configuration ----------------------------------------------------
@@ -149,7 +149,7 @@ fn elaborate(
         hpu_core: HpuCoreParams {
             rtl_params: params.clone(),
             sim_config: hpuc_sim::hpu::HpuConfig::from(
-                hpuc_sim::hpu::PhysicalConfig::gaussian_64b_fast(),
+                hpuc_sim::hpu::PhysicalConfig::gaussian_64b(),
             ),
             sim_trace: true,
             trivial: args.trivial,
@@ -163,7 +163,6 @@ fn elaborate(
             hbm_pc_ofst: 0x2000_0000,
         },
         ucore: UCoreParams {
-            node_id: 0,
             cluster_nodes: config.fpga.node_id.clone(),
             fw_pc: config.board.fw_pc,
             ct_pc: config.board.ct_pc.clone(),
@@ -224,7 +223,6 @@ fn elaborate(
     for id in config.fpga.node_id.iter() {
         let name = format!("node_{id}");
         let ipc_path = format!("{ipc_name}_{id}");
-        node_params.ucore.node_id = *id;
         node_params.dma.node_id = *id;
         node_params.ipc.ipc_path = ipc_path;
         root.insert_module(Arc::new(HpuNode::new(

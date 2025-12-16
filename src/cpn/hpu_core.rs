@@ -86,15 +86,13 @@ impl HpuCoreInner {
         let regfile = (0..params.rtl_params.regf_params.reg_nb)
             .map(|_| HpuLweCiphertextOwned::new(0, params.rtl_params.clone()))
             .collect::<Vec<_>>();
-        let sim_model = hpu_sim::Hpu::new(params.sim_config.clone());
+        let sim_model = hpu_sim::Hpu::new(&params.sim_config.clone());
         let sim_event = HpuEventStore::new(ra2m_clk_d);
         let sim_tracer = Tracer::new();
         let dop_map = HashMap::new();
         let trace_offset = match params.trace_pc {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { pc } => {
-                let addr = params.hbm_global_ofst + pc * params.hbm_pc_ofst;
-                println!("TRACE[{pc}] => {addr:x}");
                 params.hbm_global_ofst + pc * params.hbm_pc_ofst
             },
         };
@@ -203,7 +201,7 @@ impl HpuCore {
                 // Apply all trigger to sim_model
                 for trigger in batch_trigger.iter() {
                     let mut inner = self.inner.lock().unwrap();
-                    let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map,..}= *inner;
+                    let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ..}= *inner;
                     // Handle event in inner hpuc simulation model
                     if self.params.sim_trace {
                         sim_tracer.add_event(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), &trigger.event);
@@ -222,13 +220,10 @@ impl HpuCore {
 
                         match trigger.event {
                             hpu_sim::Events::IscNotify(dop_id, cmd) => {
-                                match cmd {
-                                    IscCommand::Retire => println!("Received Notify Retire"),
-                                    _ => {},
-                                }
                                 // Retrieved HpuDop from id
                                 let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
                                 dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
+                                println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
 
                                 // Append Hw trace data to deferred list
                                 let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
@@ -1147,34 +1142,43 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp{
         hpu_asm::DOp::PBS(inner) => RawDOp::PBS{
             dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+
         },
         hpu_asm::DOp::PBS_F(inner) => RawDOp::PBS_F{
             dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML2(inner) => RawDOp::PBS_ML2{
             dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML2_F(inner) => RawDOp::PBS_ML2_F{
             dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML4(inner) => RawDOp::PBS_ML4{
             dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML4_F(inner) => RawDOp::PBS_ML4_F{
             dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML8(inner) => RawDOp::PBS_ML8{
             dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::PBS_ML8_F(inner) => RawDOp::PBS_ML8_F{
             dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
             src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
+            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
         },
         hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_)=> {
             panic!("Error: DOp {asm_dop:?} must have been handled by Ucore")
