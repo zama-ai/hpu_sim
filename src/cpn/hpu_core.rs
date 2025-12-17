@@ -226,11 +226,12 @@ impl HpuCore {
                             // let mut inner = self.inner.lock().unwrap();
                             // let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
                             match trigger.event {
-                                hpu_sim::Events::IscNotify(dop_id, cmd) => {
+                                hpu_sim::Events::NotifyIsc(dop_id, cmd) => {
                                     // Retrieved HpuDop from id
                                     let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
                                     dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
-                                    println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
+                                    // TODO move to dedicated trace_log file ?!
+                                    // println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
 
                                     // Append Hw trace data to deferred list
                                     let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
@@ -261,6 +262,10 @@ impl HpuCore {
                                         _ => {/*Nothing to do is other cases */}
                                     }
                                     },
+                                    hpu_sim::Events::NotifyStartOnTimeout{last_in} => {
+                                        println!("Dop start on timeout {last_in}");
+                                        // TODO add counter and report number of timeout per IOp
+                                    }
                                     _ => {/*Nothing to do with other event*/},
                             }
                     }
