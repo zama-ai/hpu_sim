@@ -189,98 +189,115 @@ impl HpuCore {
 
         loop {
             // Pop next batch if any
-            let batch_trigger = {
+            // No filtering on cycles here take the first available one
+            let mut batch_trigger = {
                 let mut inner = self.inner.lock().unwrap();
-                inner.sim_event.pop_batch()
+                inner.sim_event.pop_batch(None)
             };
 
             if !batch_trigger.is_empty(){
                 // Wait for real simulation to match sim_model
-                delay::Delay::wait_until(self.props.clock_domain().into_tick(batch_trigger[0].at.0.cycles())).await;
+                // And keep track of time for later delta-cycle resolution
+                let delta_cycle = batch_trigger[0].at;
+                delay::Delay::wait_until(self.props.clock_domain().into_tick(delta_cycle.0.cycles())).await;
 
-                // Apply all trigger to sim_model
-                for trigger in batch_trigger.iter() {
-                    let mut inner = self.inner.lock().unwrap();
-                    let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ..}= *inner;
-                    // Handle event in inner hpuc simulation model
-                    if self.params.sim_trace {
-                        sim_tracer.add_event(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), &trigger.event);
-                    }
-                    sim_model.handle(sim_event, trigger.clone());
-                }
-
-                // Hook back side effects in main simulation
+                // Resolve delta-cycle
                 // NB: use to deffered queue for async tasks. Ease handling of inner mutex
                 let mut deferred_exec = Vec::new();
                 let mut deferred_retire = Vec::new();
                 let mut deferred_trace = Vec::new();
-                for trigger in batch_trigger.into_iter().filter(|hpuc_sim::Trigger{ event, .. }| matches!(event, hpu_sim::Events::IscNotify(_,_))) {
-                        let mut inner = self.inner.lock().unwrap();
-                        let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
+                loop {
+                    let mut inner = self.inner.lock().unwrap();
+                    let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map, ..}= *inner;
 
-                        match trigger.event {
-                            hpu_sim::Events::IscNotify(dop_id, cmd) => {
-                                // Retrieved HpuDop from id
-                                let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
-                                dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
-                                println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
-
-                                // Append Hw trace data to deferred list
-                                let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
-                                let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
-                                    IscCommand::None => isc_trace::IscCommand::None,
-                                    IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
-                                    IscCommand::Retire => isc_trace::IscCommand::Retire,
-                                    IscCommand::Refill => isc_trace::IscCommand::Refill,
-                                    IscCommand::Issue => isc_trace::IscCommand::Issue,
-                                }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn_hex: dop.inner.to_hex(), insn_asm: None, timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
-                                deferred_trace.extend(trace.into_bytes());
-
-                                // Register Deferred task if any
-                                match cmd {
-                                    IscCommand::RdUnlock => {
-                                        //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
-                                        // to clutter the source operands. The dst register is then available in
-                                        // advance, but not used before it's real availability due to wr_lock.
-                                        // -> Another option would have been to buffer the source operands. However, due to the
-                                        // operands size, we had preferred to move the behavioral execution at the rd_unlock
-                                        // stage
-                                        deferred_exec.push(dop_id);
-                                    },
-                                    IscCommand::Retire => {
-                                        let dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Tried to retired unknown DOpId {}", dop_id));
-                                        deferred_retire.push(dop);
-                                    },
-                                    _ => {/*Nothing to do is other cases */}
-                                }
-                                },
-                                _ => unreachable!("Error with previous filtering"),
+                    // Apply all trigger to sim_model
+                    for trigger in batch_trigger.iter() {
+                        // Populate hpuc simulation trace
+                        if self.params.sim_trace {
+                            sim_tracer.add_event(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), &trigger.event);
                         }
+                        // Handle event in inner hpuc simulation model
+                        sim_model.handle(sim_event, trigger.clone());
                     }
 
-                    // Deferred execution
-                    for dop_id in deferred_exec.into_iter() {
-                        self.exec(dop_id).await.expect("Error with DOp execution")
+
+                    // Hook back side effects in main simulation
+                    while let Some(trigger) = batch_trigger.pop() {
+                            // let mut inner = self.inner.lock().unwrap();
+                            // let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
+                            match trigger.event {
+                                hpu_sim::Events::IscNotify(dop_id, cmd) => {
+                                    // Retrieved HpuDop from id
+                                    let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
+                                    dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
+                                    println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
+
+                                    // Append Hw trace data to deferred list
+                                    let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
+                                    let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
+                                        IscCommand::None => isc_trace::IscCommand::None,
+                                        IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
+                                        IscCommand::Retire => isc_trace::IscCommand::Retire,
+                                        IscCommand::Refill => isc_trace::IscCommand::Refill,
+                                        IscCommand::Issue => isc_trace::IscCommand::Issue,
+                                    }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn_hex: dop.inner.to_hex(), insn_asm: None, timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
+                                    deferred_trace.extend(trace.into_bytes());
+
+                                    // Register Deferred task if any
+                                    match cmd {
+                                        IscCommand::RdUnlock => {
+                                            //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
+                                            // to clutter the source operands. The dst register is then available in
+                                            // advance, but not used before it's real availability due to wr_lock.
+                                            // -> Another option would have been to buffer the source operands. However, due to the
+                                            // operands size, we had preferred to move the behavioral execution at the rd_unlock
+                                            // stage
+                                            deferred_exec.push(dop_id);
+                                        },
+                                        IscCommand::Retire => {
+                                            let dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Tried to retired unknown DOpId {}", dop_id));
+                                            deferred_retire.push(dop);
+                                        },
+                                        _ => {/*Nothing to do is other cases */}
+                                    }
+                                    },
+                                    _ => {/*Nothing to do with other event*/},
+                            }
                     }
 
-                    // Deferred retired
-                    for dop in deferred_retire.into_iter() {
-                        self.retire(dop).await.expect("Error with DOp retire");
+                    // Refill batch_trigger with all delta-cycle event (i.e. immediat event that must be resolved in-cycle
+                    let dc_trigger = sim_event.pop_batch(Some(delta_cycle));
+                    if dc_trigger.is_empty() {
+                        break;
+                    } else {
+                        batch_trigger.extend(dc_trigger);
                     }
-                    // Deferred trace generation in trace_memory
-                    if 0 != deferred_trace.len() {
-                        // Update trace_offset for next round
-                        let addr = {
-                            let mut inner = self.inner.lock().unwrap();
-                            let addr = inner.trace_offset;
-                            inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
-                            addr
-                            };
-                        self.mem
-                            .write_bytes(self.properties(), addr, &deferred_trace)
-                            .await
-                            .expect("Error while writing trace memory");
-                    }
+
+                }
+
+                // Deferred execution
+                for dop_id in deferred_exec.into_iter() {
+                    self.exec(dop_id).await.expect("Error with DOp execution")
+                }
+
+                // Deferred retired
+                for dop in deferred_retire.into_iter() {
+                    self.retire(dop).await.expect("Error with DOp retire");
+                }
+                // Deferred trace generation in trace_memory
+                if 0 != deferred_trace.len() {
+                    // Update trace_offset for next round
+                    let addr = {
+                        let mut inner = self.inner.lock().unwrap();
+                        let addr = inner.trace_offset;
+                        inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
+                        addr
+                        };
+                    self.mem
+                        .write_bytes(self.properties(), addr, &deferred_trace)
+                        .await
+                        .expect("Error while writing trace memory");
+                }
             } else {
                event::Event::wait(&forge_event_name!(|self| "SimInnerPushDOp")).await;
             }
@@ -1042,21 +1059,27 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
         }
     }
 
-    fn pop_batch(&mut self) -> Vec<hpuc_sim::Trigger<E>> {
+    fn pop_batch(&mut self, filter:Option<hpuc_sim::Cycle>) -> Vec<hpuc_sim::Trigger<E>> {
       let mut batch = Vec::new();
 
-    // Pop first event and all subsequent Ord::Equal events
-    if let Some(first) = self.triggers.pop() {
-        // Keep popping while the next top is equal according to Ord
-        while let Some(next) = self.triggers.peek() {
-            if next.cmp(&first) == std::cmp::Ordering::Equal {
-                batch.push(self.triggers.pop().unwrap());
-            } else {
-                break;
-            }
+      // Extract targeted cycle
+      let pop_at = if let Some(cycle) = filter {
+          cycle
+      } else if let Some(hpuc_sim::Trigger{at,..}) = self.triggers.peek() { 
+          at.clone()
+      } else {// early return
+          return batch;
+      };
+
+    // Pop all subsequent Ord::Equal events
+    while let Some(next) = self.triggers.peek() {
+        if next.at.cmp(&pop_at) == std::cmp::Ordering::Equal {
+            batch.push(self.triggers.pop().unwrap());
+        } else {
+            break;
         }
-        batch.push(first);
     }
+
     batch
     }
 }
