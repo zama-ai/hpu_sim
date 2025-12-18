@@ -179,7 +179,7 @@ impl HpuCore {
 
         }
     }
-    async fn simulate_inner(self: Arc<Self>) -> ! {
+    async fn simulate_inner(self: Arc<Self>) {
         {
             let mut inner = self.inner.lock().unwrap();
             let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer,..}= *inner;
@@ -189,10 +189,9 @@ impl HpuCore {
 
         loop {
             // Pop next batch if any
-            // No filtering on cycles here take the first available one
             let mut batch_trigger = {
                 let mut inner = self.inner.lock().unwrap();
-                inner.sim_event.pop_batch(None)
+                inner.sim_event.pop_batch()
             };
 
             if !batch_trigger.is_empty(){
@@ -270,14 +269,13 @@ impl HpuCore {
                             }
                     }
 
-                    // Refill batch_trigger with all delta-cycle event (i.e. immediat event that must be resolved in-cycle
-                    let dc_trigger = sim_event.pop_batch(Some(delta_cycle));
-                    if dc_trigger.is_empty() {
-                        break;
+                    // Refill batch_trigger with delta-cycle event (i.e. immediat event that must be resolved in-cycle)
+                    // Pop them one by one to prevent issue with inner simulation filtering
+                    if let Some(dc_trigger) = sim_event.pop_delta(delta_cycle) {
+                        batch_trigger.push(dc_trigger);
                     } else {
-                        batch_trigger.extend(dc_trigger);
+                        break;
                     }
-
                 }
 
                 // Deferred execution
@@ -1064,13 +1062,11 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
         }
     }
 
-    fn pop_batch(&mut self, filter:Option<hpuc_sim::Cycle>) -> Vec<hpuc_sim::Trigger<E>> {
+    fn pop_batch(&mut self) -> Vec<hpuc_sim::Trigger<E>> {
       let mut batch = Vec::new();
 
       // Extract targeted cycle
-      let pop_at = if let Some(cycle) = filter {
-          cycle
-      } else if let Some(hpuc_sim::Trigger{at,..}) = self.triggers.peek() { 
+      let pop_at = if let Some(hpuc_sim::Trigger{at,..}) = self.triggers.peek() { 
           at.clone()
       } else {// early return
           return batch;
@@ -1087,27 +1083,49 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
 
     batch
     }
+
+    fn pop_delta(&mut self, delta: hpuc_sim::Cycle) -> Option<hpuc_sim::Trigger<E>> {
+        // Pop next subsequent Ord::Equal events if any
+        if let Some(next) = self.triggers.peek() {
+            if next.at.cmp(&delta) == std::cmp::Ordering::Equal {
+                Some(self.triggers.pop().unwrap())
+            } else {
+                None
+            }
+        } else {None}
+    }
 }
 
 impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
     type Event = E;
 
-    fn contains_event(&self, event: &Self::Event) -> bool {
-        self.triggers
-            .iter()
-            .map(|trigger| &trigger.event)
-            .find(|e| *e == event)
-            .is_some()
+    fn contains_event(&self, event: &Self::Event, filter: Option<hpuc_sim::Cycle>) -> bool {
+        if let Some(filter_at) = filter.as_ref() {
+            self.triggers
+                .iter()
+                .find(|hpuc_sim::Trigger{ at, event: e }| (e == event) && (at == filter_at))
+                .is_some()
+        } else {
+            self.triggers
+                .iter()
+                .map(|trigger| &trigger.event)
+                .find(|e| *e == event)
+                .is_some()
+        }
+
     }
 
     fn dispatch(&mut self, event: Self::Event, delay: Option<hpuc_sim::Cycle>) {
-        let delay = delay.unwrap_or(hpuc_sim::Cycle::ZERO);
         let ra2m_cycle = self.ra2m_clk_d.from_tick(cur_tick());
+        let dispatch_cycle = hpuc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hpuc_sim::Cycle::ZERO);
 
-        self.triggers.push(hpuc_sim::Trigger{
-            at: hpuc_sim::Cycle(ra2m_cycle.into()) +delay,
-            event,
-            })
+        // NB: Discard event dispach in the current cycle if already present
+        if !self.contains_event(&event, Some(dispatch_cycle)) {
+            self.triggers.push(hpuc_sim::Trigger {
+                at: dispatch_cycle,
+                event,
+            });
+        }
     }
 
 }
