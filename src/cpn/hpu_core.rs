@@ -29,6 +29,8 @@ pub struct HpuCoreParams {
 
     /// Do trivial computation
     pub trivial: bool,
+    /// Disable real tfhe-rs computation
+    pub noops: bool,
 
     // Used memory pseudo-channel
     pub ct_pc: Vec<MemKind>,
@@ -280,7 +282,9 @@ impl HpuCore {
 
                 // Deferred execution
                 for dop_id in deferred_exec.into_iter() {
-                    self.exec(dop_id).await.expect("Error with DOp execution")
+                    if !self.params.noops {
+                        self.exec(dop_id).await.expect("Error with DOp execution")
+                    }
                 }
 
                 // Deferred retired

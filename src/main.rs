@@ -39,7 +39,7 @@ pub struct Args {
     /// Performance parameters
     /// Depicts hardware crypto-parameters and architecture details
     /// => Used for performance estimation
-    #[clap(long, value_parser, default_value = "TUniform64bFast")]
+    #[clap(long, value_parser, default_value = "TUniform64bPFail128Psi64")]
     pub perf_params: PerfParamsName,
 
     // Override params --------------------------------------------------
@@ -61,6 +61,11 @@ pub struct Args {
     /// WARN: Only work if user application send trivial ciphertext
     #[clap(long, value_parser)]
     trivial: bool,
+
+    /// Disable tfhe-rs computation
+    /// Fast simulation with false results but accurate performance estimation
+    #[clap(long, value_parser)]
+    noops: bool,
 
     // Simulation configuration -----------------------------------------
     /// Simulation timing mode
@@ -125,7 +130,7 @@ fn elaborate(
         ra2m_cpn::net::SwitchParams {
             inflight_req: 10,
             switch_latency: types::Latency::Cycle(2.cycles()),
-            bandwidth: 10.MiB_s(),
+            bandwidth: 25.GB_s(),
             port_cap: None,
         },
         root.child_properties("b2b_switch", Default::default()),
@@ -135,7 +140,7 @@ fn elaborate(
         ra2m_cpn::net::SwitchParams {
             inflight_req: 10,
             switch_latency: types::Latency::Cycle(2.cycles()),
-            bandwidth: 1.MiB_s(),
+            bandwidth: 25.GB_s(),
             port_cap: None,
         },
         root.child_properties("ctrl_xbar", Default::default()),
@@ -149,6 +154,7 @@ fn elaborate(
             sim_config: hpuc_sim::hpu::HpuConfig::from(&args.perf_params),
             sim_trace: true,
             trivial: args.trivial,
+            noops: args.noops,
 
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
@@ -184,20 +190,30 @@ fn elaborate(
             rtl: hpu_params.clone(),
             latency: types::Latency::Cycle(1.cycles()),
         },
+        xbar: ra2m_cpn::mem::XBarParams {
+            inflight_req: 10,
+            frontend_latency: types::Latency::Cycle(2.cycles()),
+            forward_latency: types::Latency::Cycle(1.cycles()),
+            bandwidth: 1.PiB_s(), // Kind of disabling BW limitation
+            inbound_cap: None,
+            outbound_cap: None,
+        },
         ddr: ra2m_cpn::mem::NpRamParams {
             ports: 1,
             size: 4.GiB(),
             base_addr: Some(0x2000_0000),
             latency: types::Latency::Cycle(1.cycles()),
-            bandwidth: 1.GiB_s(),
+            bandwidth: 25.6.GB_s(),
             binfile: None,
         },
+        // NB: Hbm2e is capped as 16GiB, but we used 2 here
+        // Double peak bandwidth and size
         hbm: ra2m_cpn::mem::NpRamParams {
             ports: 2,
             size: 32.GiB(),
             base_addr: Some(0x40_0000_0000),
             latency: types::Latency::Cycle(1.cycles()),
-            bandwidth: 1.GiB_s(),
+            bandwidth: 6.4.TB_s(),
             binfile: None,
         },
         dma: ra2m_cpn::net::NDmaParams {
@@ -205,7 +221,7 @@ fn elaborate(
             inflight_req: 4,
             frontend_latency: types::Latency::Cycle(1.cycles()),
             forward_latency: types::Latency::Cycle(1.cycles()),
-            bandwidth: 1.GiB_s(),
+            bandwidth: 25.GB_s(),
         },
         ipc: ra2m_cpn::ffi::ipc::H2sBridgeParams {
             ipc_path: "".to_string(),

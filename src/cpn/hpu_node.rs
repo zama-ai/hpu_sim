@@ -21,6 +21,7 @@ pub struct HpuNodeParams {
     pub hpu_core: HpuCoreParams,
     pub ucore: UCoreParams,
     pub regmap: RegmapParams,
+    pub xbar: mem::XBarParams,
     pub ddr: mem::NpRamParams,
     pub hbm: mem::NpRamParams,
     pub dma: net::NDmaParams<u8>,
@@ -57,14 +58,7 @@ impl HpuNode {
         // Global interconnect
         // ===================================================================
         inner.insert_module(Arc::new(mem::XBar::new(
-            mem::XBarParams {
-                inflight_req: 10,
-                frontend_latency: types::Latency::Cycle(2.cycles()),
-                forward_latency: types::Latency::Cycle(1.cycles()),
-                bandwidth: 10.MiB_s(),
-                inbound_cap: None,
-                outbound_cap: None,
-            },
+            params.xbar.clone(),
             inner.child_properties("xbar", Default::default()),
         )));
 
