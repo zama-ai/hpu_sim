@@ -5,11 +5,15 @@
 //!
 //! WARN: User must start the HpuSim binary before tfhe-rs application
 
-use hpu_sim::cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams};
+use hpu_sim::{
+    cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams},
+    params::ParamsName,
+};
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
 
 static OUTPUT_FOLDER: &'static str = "/tmp/hpu_sim";
+
 /// Define CLI arguments
 use clap::Parser;
 #[derive(clap::Parser, Debug, Clone)]
@@ -26,23 +30,10 @@ pub struct Args {
     )]
     pub config: ShellString,
 
-    /// Tfhe scheme parameters
-    /// Depicts the used tfhe-rs parameters set
-    #[clap(
-        long,
-        value_parser,
-        default_value = "${HPU_SIM_DIR}/params/tuniform_64b_pfail128_psi64.toml"
-    )]
-    pub params: ShellString,
-
-    /// Hpu rtl parameters
-    /// Also contains the properties of nodes (i.e. on-board memory size and so on)
-    #[clap(
-        long,
-        value_parser,
-        default_value = "${HPU_SIM_DIR}/params/gaussian_64b_fast.toml"
-    )]
-    pub rtl_params: ShellString,
+    /// Physical parameters
+    /// Depicts hardware crypto-parameters and architecture details
+    #[clap(long, value_parser, default_value = "TUniform64bFast")]
+    pub params_name: ParamsName,
 
     // Override params --------------------------------------------------
     // Quick way to override parameters through ClI instead of editing the
@@ -101,7 +92,7 @@ pub struct Args {
 /// Built the hpu_sim architecture based on inner modules and user arguments
 fn elaborate(
     config: &HpuConfig,
-    params: &HpuParameters,
+    hpu_params: &HpuParameters,
     args: &Args,
 ) -> Result<module::Area, anyhow::Error> {
     // Some sanity check on configuration and usefull information extraction
@@ -147,7 +138,7 @@ fn elaborate(
     // List of nodes
     let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {
-            rtl_params: params.clone(),
+            rtl_params: hpu_params.clone(),
             sim_config: hpuc_sim::hpu::HpuConfig::from(
                 hpuc_sim::hpu::PhysicalConfig::gaussian_64b(),
             ),
@@ -174,7 +165,7 @@ fn elaborate(
             iopq: iopq_config.clone(),
             ackq: ackq_config.clone(),
 
-            rtl_params: params.clone(),
+            rtl_params: hpu_params.clone(),
             hbm_global_ofst: 0x40_0000_0000,
             hbm_pc_ofst: 0x2000_0000,
         },
@@ -185,7 +176,7 @@ fn elaborate(
                 .iter()
                 .map(|path| path.expand())
                 .collect::<Vec<_>>(),
-            rtl: params.clone(),
+            rtl: hpu_params.clone(),
             latency: types::Latency::Cycle(1.cycles()),
         },
         ddr: ra2m_cpn::mem::NpRamParams {
@@ -286,21 +277,21 @@ async fn hpu_sim() -> Result<(), anyhow::Error> {
 
     // Load parameters from configuration file ------------------------------------
     let config = HpuConfig::from_toml(&args.config.expand());
-    let params = {
-        let mut rtl_params = HpuParameters::from_toml(&args.params.expand());
+    let hpu_params = {
+        let mut params = HpuParameters::from(&args.params_name);
 
         // Override some parameters if required
         if let Some(register) = args.register.as_ref() {
-            rtl_params.regf_params.reg_nb = *register;
+            params.regf_params.reg_nb = *register;
         }
         if let Some(isc_depth) = args.isc_depth.as_ref() {
-            rtl_params.isc_params.depth = *isc_depth;
+            params.isc_params.depth = *isc_depth;
         }
-        rtl_params
+        params
     };
-    println!("HpuSim parameters after override with CLI: {params:?}");
+    println!("HpuSim parameters after override with CLI: {hpu_params:?}");
 
-    let model = elaborate(&config, &params, &args)?;
+    let model = elaborate(&config, &hpu_params, &args)?;
     simulate(model, &args).await?;
     Ok(())
 }

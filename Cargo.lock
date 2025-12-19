@@ -916,6 +916,7 @@ dependencies = [
  "ra2m",
  "serde",
  "tfhe",
+ "toml 0.8.23",
 ]
 
 [[package]]
