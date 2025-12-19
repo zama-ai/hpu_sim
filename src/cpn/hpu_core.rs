@@ -20,9 +20,9 @@ use hpu_asm::ToHex;
 /// HpuCore parameters
 #[derive(Debug, Clone)]
 pub struct HpuCoreParams {
-    // Rtl parameters for tfhe-rs execution
-    pub rtl_params: HpuParameters,
-    // Configuration parameters for simulation model
+    // Compute parameters for tfhe-rs execution
+    pub compute_params: HpuParameters,
+    // Performance config for simulation model
     pub sim_config: hpu_sim::HpuConfig,
     // Enable hpuc_sim tracing feature
     pub sim_trace: bool, 
@@ -83,8 +83,8 @@ struct HpuCoreInner {
 
 impl HpuCoreInner {
     pub fn new(params: &HpuCoreParams, ra2m_clk_d: ClockDomain) -> Self {
-        let regfile = (0..params.rtl_params.regf_params.reg_nb)
-            .map(|_| HpuLweCiphertextOwned::new(0, params.rtl_params.clone()))
+        let regfile = (0..params.compute_params.regf_params.reg_nb)
+            .map(|_| HpuLweCiphertextOwned::new(0, params.compute_params.clone()))
             .collect::<Vec<_>>();
         let sim_model = hpu_sim::Hpu::new(&params.sim_config.clone());
         let sim_event = HpuEventStore::new(ra2m_clk_d);
@@ -325,20 +325,20 @@ use tfhe::shortint::parameters::KeySwitch32PBSParameters;
 
 impl HpuCore {
     fn trivial_decode<T: UnsignedInteger>(&self, body: T) -> T {
-        let pbs_p = self.params.rtl_params.pbs_params;
+        let pbs_p = self.params.compute_params.pbs_params;
         let cleartext_and_padding_width = pbs_p.message_width + pbs_p.carry_width + 1;
         (body >> (T::BITS - cleartext_and_padding_width))
             & ((T::ONE << cleartext_and_padding_width) - T::ONE)
     }
     #[allow(dead_code)]
     fn trivial_encode<T: UnsignedInteger>(&self, clear: T) -> T {
-        let pbs_p = self.params.rtl_params.pbs_params;
+        let pbs_p = self.params.compute_params.pbs_params;
         let cleartext_and_padding_width = pbs_p.message_width + pbs_p.carry_width + 1;
         clear << (T::BITS - cleartext_and_padding_width)
     }
 
     fn as_trivial<T: UnsignedInteger>(&self, hpu_ct: &HpuLweCiphertextView<T>) -> T {
-        let body = hpu_ct[hpu_big_lwe_ciphertext_size(&self.params.rtl_params) - 1];
+        let body = hpu_ct[hpu_big_lwe_ciphertext_size(&self.params.compute_params) - 1];
         self.trivial_decode(body)
     }
 
@@ -507,7 +507,7 @@ impl HpuCore {
                     hpu_asm::ImmId::Cst(cst) => cst as u64,
                     _ => panic!("Template must have been resolved before execution"),
                 };
-                let msg_encoded = msg_cst * self.params.rtl_params.pbs_params.delta();
+                let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_add_assign(&mut cpu_s0, Plaintext(msg_encoded));
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
@@ -524,7 +524,7 @@ impl HpuCore {
                     hpu_asm::ImmId::Cst(cst) => cst as u64,
                     _ => panic!("Template must have been resolved before execution"),
                 };
-                let msg_encoded = msg_cst * self.params.rtl_params.pbs_params.delta();
+                let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_sub_assign(&mut cpu_s0, Plaintext(msg_encoded));
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
@@ -542,7 +542,7 @@ impl HpuCore {
                     hpu_asm::ImmId::Cst(cst) => cst as u64,
                     _ => panic!("Template must have been resolved before execution"),
                 };
-                let msg_encoded = msg_cst * self.params.rtl_params.pbs_params.delta();
+                let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_add_assign(&mut cpu_s0, Plaintext(msg_encoded));
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
@@ -701,12 +701,12 @@ impl HpuCore {
         );
 
         // Generate Lut
-        let hpu_lut = create_hpu_lookuptable(&self.params.rtl_params, &lut);
+        let hpu_lut = create_hpu_lookuptable(&self.params.compute_params, &lut);
         let tfhe_lut = GlweCiphertext::from(hpu_lut.as_view());
 
         // Compute Lut properties
         let (modulus_sup, box_size, fn_stride) = {
-            let pbs_p = &self.params.rtl_params.pbs_params;
+            let pbs_p = &self.params.compute_params.pbs_params;
             let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
             let box_size = pbs_p.polynomial_size / modulus_sup;
             // Max valid degree for a ciphertext when using the LUT we generate
@@ -754,7 +754,7 @@ impl HpuCore {
             {
                 keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
 
-            let modulus_switch_type = self.params.rtl_params.pbs_params.modulus_switch_type;
+            let modulus_switch_type = self.params.compute_params.pbs_params.modulus_switch_type;
 
             let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
             let bfr_after_ms = match modulus_switch_type {
@@ -779,7 +779,7 @@ impl HpuCore {
 
             // Compute ManyLut function stride
             let fn_stride = {
-                let pbs_p = &self.params.rtl_params.pbs_params;
+                let pbs_p = &self.params.compute_params.pbs_params;
                 let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
                 let box_size = pbs_p.polynomial_size / modulus_sup;
                 // Max valid degree for a ciphertext when using the LUT we generate
@@ -813,7 +813,7 @@ impl HpuCore {
     /// Insert a cpu value into the register file
     fn cpu2reg(&self, reg_id: hpu_asm::RegId, cpu: LweCiphertextView<u64>) {
         let mut inner = self.inner.lock().unwrap();
-        let hpu = HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.rtl_params.clone());
+        let hpu = HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.compute_params.clone());
         std::iter::zip(
             inner.regfile[reg_id.0 as usize]
                 .as_mut_view()
@@ -854,7 +854,7 @@ impl HpuCore {
             // Extract HpuBsk /HpuKsk from hbm
             let hpu_bsk = {
                 // Create Hpu Bsk container
-                let mut bsk = HpuLweBootstrapKeyOwned::new(0, self.params.rtl_params.clone());
+                let mut bsk = HpuLweBootstrapKeyOwned::new(0, self.params.compute_params.clone());
 
                 // Copy content from Hbm
                 let hw_slice = bsk.as_mut_view().into_container();
@@ -888,7 +888,7 @@ impl HpuCore {
             };
             let hpu_ksk = {
                 // Create Hpu ksk container
-                let mut ksk = HpuLweKeyswitchKeyOwned::new(0, self.params.rtl_params.clone());
+                let mut ksk = HpuLweKeyswitchKeyOwned::new(0, self.params.compute_params.clone());
 
                 // Copy content from Hbm
                 let hw_slice = ksk.as_mut_view().into_container();
@@ -920,7 +920,7 @@ impl HpuCore {
             };
 
             // Allocate Pbs intermediate buffer
-            let pbs_p = KeySwitch32PBSParameters::from(self.params.rtl_params.clone());
+            let pbs_p = KeySwitch32PBSParameters::from(self.params.compute_params.clone());
             let bfr_after_ks = LweCiphertext::new(
                 0,
                 pbs_p.lwe_dimension.to_lwe_size(),
@@ -951,8 +951,8 @@ impl HpuCore {
     fn cid_to_addr(&self, cid: hpu_asm::CtId) -> Vec<Addr> {
         let ct_chunk_size_b = 
             page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
-                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                hpu_big_lwe_ciphertext_size(&self.params.compute_params)
+                    .div_ceil(self.params.compute_params.pc_params.pem_pc)
                     * std::mem::size_of::<u64>());
         // Ct_ofst is equal over PC
         let ct_ofst = cid.0 as usize
@@ -972,8 +972,8 @@ impl HpuCore {
     fn ct_pc_pattern(&self) -> Pattern {
         let ct_chunk_size_b = 
             page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
-                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                hpu_big_lwe_ciphertext_size(&self.params.compute_params)
+                    .div_ceil(self.params.compute_params.pc_params.pem_pc)
                     * std::mem::size_of::<u64>());
 
         Pattern::Simple(ct_chunk_size_b.Byte())

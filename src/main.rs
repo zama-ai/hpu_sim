@@ -7,7 +7,7 @@
 
 use hpu_sim::{
     cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams},
-    params::ParamsName,
+    params::{ComputeParamsName, PerfParamsName},
 };
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
@@ -30,10 +30,17 @@ pub struct Args {
     )]
     pub config: ShellString,
 
-    /// Physical parameters
+    /// Comupute parameters
     /// Depicts hardware crypto-parameters and architecture details
+    /// => Used for tfhe-rs inner computation and stimulus generation
     #[clap(long, value_parser, default_value = "TUniform64bFast")]
-    pub params_name: ParamsName,
+    pub compute_params: ComputeParamsName,
+
+    /// Performance parameters
+    /// Depicts hardware crypto-parameters and architecture details
+    /// => Used for performance estimation
+    #[clap(long, value_parser, default_value = "TUniform64bFast")]
+    pub perf_params: PerfParamsName,
 
     // Override params --------------------------------------------------
     // Quick way to override parameters through ClI instead of editing the
@@ -138,10 +145,8 @@ fn elaborate(
     // List of nodes
     let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {
-            rtl_params: hpu_params.clone(),
-            sim_config: hpuc_sim::hpu::HpuConfig::from(
-                hpuc_sim::hpu::PhysicalConfig::gaussian_64b(),
-            ),
+            compute_params: hpu_params.clone(),
+            sim_config: hpuc_sim::hpu::HpuConfig::from(&args.perf_params),
             sim_trace: true,
             trivial: args.trivial,
 
@@ -278,7 +283,7 @@ async fn hpu_sim() -> Result<(), anyhow::Error> {
     // Load parameters from configuration file ------------------------------------
     let config = HpuConfig::from_toml(&args.config.expand());
     let hpu_params = {
-        let mut params = HpuParameters::from(&args.params_name);
+        let mut params = HpuParameters::from(&args.compute_params);
 
         // Override some parameters if required
         if let Some(register) = args.register.as_ref() {
