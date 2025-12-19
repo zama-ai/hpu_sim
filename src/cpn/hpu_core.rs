@@ -283,7 +283,7 @@ impl HpuCore {
                 // Deferred execution
                 for dop_id in deferred_exec.into_iter() {
                     if !self.params.noops {
-                        self.exec(dop_id).await.expect("Error with DOp execution")
+                        self.exec(dop_id).await.expect("Error with DOp execution");
                     }
                 }
 
@@ -300,8 +300,17 @@ impl HpuCore {
                         inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
                         addr
                         };
-                    self.mem
-                        .write_bytes(self.properties(), addr, &deferred_trace)
+
+                    // Use explicit request to disable timed mode
+                    let trace_req = membus::MemBus::new_wrapped(
+                            self.properties().uid(),
+                            membus::Command::Write,
+                            Addr::Phys(addr),
+                            Pattern::Simple(deferred_trace.len().Byte()),
+                            Some(&deferred_trace),
+                            Some(PacketOptions{timed: false,..Default::default()}),
+                        );
+                    let _resp = self.mem.b_req_resp(trace_req)
                         .await
                         .expect("Error while writing trace memory");
                 }
@@ -356,6 +365,10 @@ impl HpuCore {
 
 impl HpuCore {
     async fn exec(&self, dop_id: hpu_sim::DOpId) -> Result<(), anyhow::Error> {
+        // Perf modeling is handled by hpu_compiler model
+        // This function is only in charge of behavioral computation
+        // => All request across the architecture is made in untimed mode
+        let untimed_options = PacketOptions{timed: false,..Default::default()};
         let dop_inner = {
             let inner = self.inner.lock().unwrap();
             let dop = inner.dop_map.get(&dop_id).expect("Invalid DOpId");
@@ -381,7 +394,7 @@ impl HpuCore {
                 // -> Use burst instead of two separate requests
                 let mut ct_mem = Vec::new();
                 let mem_req= self.cid_to_addr(cid_ofst).into_iter().map(|addr| 
-                    membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read, addr, self.ct_pc_pattern(),None, None)
+                    membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read, addr, self.ct_pc_pattern(),None, Some(untimed_options))
                 ).collect::<Vec<_>>();
 
                 for req in mem_req.into_iter() {
@@ -446,7 +459,7 @@ impl HpuCore {
                         addr,
                         Pattern::Simple(data_u8.len().Byte()), // Only write used data, not the memory used for padding
                         Some(data_u8),
-                         None);
+                         Some(untimed_options));
 
                      self.mem.b_req_resp(mem_req).await?;
                 }
@@ -624,7 +637,7 @@ impl HpuCore {
                 }
 
                 // Push ack in stream
-                let ack_pkt = Packet::wrap_payload(dop, Default::default());
+                let ack_pkt = Packet::wrap_payload(dop, PacketOptions{timed: false, ..Default::default()});
                 self.ack.fwd_pkt(ack_pkt).await;
 
                 // Generate executed DOp order
@@ -844,6 +857,10 @@ impl HpuCore {
                 };
         // Retrieved key from memory in internal cache
         if sks_is_none {
+            // Perf modeling is handled by hpu_compiler model
+            // This function is only in charge of behavioral computation
+            // => All request across the architecture is made in untimed mode
+            let untimed_options = PacketOptions{timed: false,..Default::default()};
             log!(|self| log::Category::Own, log::Verbosity::Debug => => "Reload Bsk/Ksk from memory");
             // TODO check state of Bsk/Ksk in register
             // assert!(
@@ -882,7 +899,7 @@ impl HpuCore {
                         // Issue read request
                         let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
                                 addr,
-                                        Pattern::Simple(hpu_u8.len().Byte()),None, None);
+                                        Pattern::Simple(hpu_u8.len().Byte()),None, Some(untimed_options));
 
                             let resp = self.mem.b_req_resp(mem_req).await?;
                             let data = resp.payload().data();
@@ -914,7 +931,7 @@ impl HpuCore {
                         // Issue read request
                         let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
                                 addr,
-                                        Pattern::Simple(hpu_u8.len().Byte()),None, None);
+                                        Pattern::Simple(hpu_u8.len().Byte()),None, Some(untimed_options));
 
                             let resp = self.mem.b_req_resp(mem_req).await?;
                             let data = resp.payload().data();
