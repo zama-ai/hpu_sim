@@ -9,6 +9,7 @@ use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
 
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
+use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
 use super::DOpPayload;
@@ -31,6 +32,11 @@ pub struct HpuCoreParams {
     pub trivial: bool,
     /// Disable real tfhe-rs computation
     pub noops: bool,
+
+    /// Dump regsiter
+    /// Used to dump execution trace for RTL simulation & debug
+    /// Dump register after each update
+    pub dump_reg: bool,
 
     // Used memory pseudo-channel
     pub ct_pc: Vec<MemKind>,
@@ -1004,66 +1010,71 @@ impl HpuCore {
 
 impl HpuCore {
     fn dump_op_reg(&self, op: &hpu_asm::DOp) {
-    //     if self.options.dump_out.is_some() && self.options.dump_reg {
-    //         let dump_out = self.options.dump_out.as_ref().unwrap();
+        if self.params.dump_reg {
+            // Create folder-path
+            let trace_folder = Output::get_trace_folder();
+            let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
 
-    //         // Dump register value
-    //         let regid = match op {
-    //             hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
-    //             | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => inner.rid.0 as usize,
-    //             hpu_asm::DOp::ADDS(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::SUBS(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::SSUB(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::MULS(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::ADD(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::SUB(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::MAC(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML2(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML4(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML8(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML2_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML4_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             hpu_asm::DOp::PBS_ML8_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-    //             _ => return,
-    //         };
-    //         let regf = self.regfile[regid].as_view();
+            // Dump register value
+            let regid = match op {
+                hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
+                | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => inner.rid.0 as usize,
+                hpu_asm::DOp::ADDS(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::SUBS(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::SSUB(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::MULS(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::ADD(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::SUB(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::MAC(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML2(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML4(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML8(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_F(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML2_F(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML4_F(op_impl) => op_impl.0.dst_rid.0 as usize,
+                hpu_asm::DOp::PBS_ML8_F(op_impl) => op_impl.0.dst_rid.0 as usize,
+                _ => return,
+            };
+            {
+                let inner = self.inner.lock().unwrap();
+                let regf = inner.regfile[regid].as_view();
 
-    //         // Create base-path
-    //         let base_path = format!("{}/blwe/run/blwe_isc{}_reg", dump_out, self.pc,);
-    //         self.dump_regf(regf, &base_path);
-    //     }
+                let base_path = format!("{}/blwe/run/blwe_isc{}_reg", trace_path.to_str().unwrap(), inner.pc,);
+                self.dump_regf(regf, &base_path);
+            }
+        }
     }
 
     /// Dump associated regf value in a file
     fn dump_regf(&self, regf: HpuLweCiphertextView<u64>, base_path: &str) {
-        // // Iterate over slice
-        // regf.into_container()
-        //     .iter()
-        //     .enumerate()
-        //     .for_each(|(i, slice)| {
-        //         // Create file-path
-        //         let file_path = format!("{base_path}_{:0>1x}.hex", i);
-        //         let mut wr_f = MockupOptions::open_wr_file(&file_path);
+        // Iterate over slice
+        regf.into_container()
+            .iter()
+            .enumerate()
+            .for_each(|(i, slice)| {
+                // Create file-path
+                let file_path = format!("{base_path}_{:0>1x}.hex", i);
 
-        //         writeln!(&mut wr_f, "# LweCiphertext slice #{}", i).unwrap();
-        //         // Compact Blwe on 32b if possible
-        //         if self.params.rtl_params.ntt_params.ct_width <= u32::BITS {
-        //             let slice_32b = slice.iter().map(|x| *x as u32).collect::<Vec<u32>>();
-        //             slice_32b.as_slice().write_hex(
-        //                 &mut wr_f,
-        //                 self.params.rtl_params.pc_params.pem_bytes_w,
-        //                 Some("XX"),
-        //             );
-        //         } else {
-        //             slice.write_hex(
-        //                 &mut wr_f,
-        //                 self.params.rtl_params.pc_params.pem_bytes_w,
-        //                 Some("XX"),
-        //             );
-        //         }
-        //     });
+                let mut wr_f = open_wr_file(&file_path);
+
+                writeln!(&mut wr_f, "# LweCiphertext slice #{}", i).unwrap();
+                // Compact Blwe on 32b if possible
+                if self.params.compute_params.ntt_params.ct_width <= u32::BITS {
+                    let slice_32b = slice.iter().map(|x| *x as u32).collect::<Vec<u32>>();
+                    slice_32b.as_slice().write_hex(
+                        &mut wr_f,
+                        self.params.compute_params.pc_params.pem_bytes_w,
+                        Some("XX"),
+                    );
+                } else {
+                    slice.write_hex(
+                        &mut wr_f,
+                        self.params.compute_params.pc_params.pem_bytes_w,
+                        Some("XX"),
+                    );
+                }
+            });
     }
 }
 
@@ -1253,3 +1264,23 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp{
     };
     DOp{ raw, id }
 }
+
+// Utilities function to handle filesystem
+fn create_dir(file_path: &str) {
+    let path = std::path::Path::new(&file_path);
+    if let Some(dir_p) = path.parent() {
+        std::fs::create_dir_all(dir_p).unwrap();
+    }
+}
+
+pub fn open_wr_file(file_path: &str) -> std::fs::File {
+    create_dir(file_path);
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(file_path)
+        .unwrap()
+}
+
+

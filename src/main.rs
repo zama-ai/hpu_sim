@@ -98,6 +98,13 @@ pub struct Args {
     /// Provide list regex={cat:verb, ...} to alter component hw_tracer
     #[clap(long, value_parser)]
     trace_args: Option<Vec<trace::Args>>,
+
+    // Dump options ---------------------------------------------------------
+    // NB: Input/Output dump are handle at user-side (i.e. in application binary)
+    //     Here only handle internal value such as reg-dump
+    /// Dump content of register after each DOp execution
+    #[clap(long, value_parser)]
+    dump_reg: bool,
 }
 
 /// Elaboration phases
@@ -155,6 +162,7 @@ fn elaborate(
             sim_trace: true,
             trivial: args.trivial,
             noops: args.noops,
+            dump_reg: args.dump_reg,
 
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
