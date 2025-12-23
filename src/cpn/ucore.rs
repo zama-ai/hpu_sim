@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::DOpPayload;
+use super::{DOpPayload, IOpPayload};
 
 /// UCore parameters
 #[derive(Debug, Clone)]
@@ -47,7 +47,7 @@ pub struct UCoreParams {
 struct UCoreInner {
     config: UcoreConfig,
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
-    iop_pdg: VecDeque<(time::Tick, hpu_asm::IOp)>,
+    iop_pdg: VecDeque<hpu_asm::IOp>,
     event_list: HashMap<UcoreHash, Event>,
     b2b_pool: B2bPool,
     dst_ldq: Vec<DstLdOrder>,
@@ -149,12 +149,17 @@ pub struct UCore {
     /// Membus to access associated on-board memory
     #[port]
     mem: port::ReqRespPort<MemBus>,
-    /// Half-duplex port to issue request to Hpu
+
+    // Interface with HpuCore
+    // Slighly different from RTL, indeed iop_ctx is furnished for better context in logging
+    /// Half-duplex port to issue request to HpuCore
+    #[port]
+    hpu_ctx: port::MasterPort<IOpPayload>,
     #[port]
     hpu_req: port::MasterPort<DOpPayload>,
-    /// Half-duplex port to received ack from Hpu
+    /// Half-duplex port to received ack from HpuCore
     #[port]
-    hpu_ack: port::SlavePort<DOpPayload>,
+    hpu_ack: port::SlavePort<IOpPayload>,
 
     /// Ctrl: Issue/Received control token for interboard synchronisation
     #[port]
@@ -184,6 +189,7 @@ impl UCore {
 
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
+            hpu_ctx: port::MasterPort::new("hpu_ctx", props.clone(), Some(params.axis_depth), None),
             hpu_req: port::MasterPort::new("hpu_req", props.clone(), Some(params.axis_depth), None),
             hpu_ack: port::SlavePort::new("hpu_ack", props.clone(), Some(params.axis_depth), None),
             ctrl: port::ReqRespPort::new("ctrl", props.clone(), None, None),
@@ -320,23 +326,25 @@ impl UCore {
                 + *data_ofst
                 + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>());
             if word_free != 0 {
-                let dop = self
+                let iop_pld = self
                     .hpu_ack
                     .wait_pkt_ep(None)
                     .await
                     .expect("Issue with DOpPayload xfer")
                     .unwrap_payload();
-                let dop_hex = dop.inner.to_hex();
 
-                // TODO Store IID in IOp Ack instead ?
+                // Generate execution report
+                self.dump_iop_report(&iop_pld);
+
+
                 let (hid, iop) = {
                     let mut inner = self.inner.lock().unwrap();
                     let hid = inner.config.node_id;
-                    let (start_tick, iop) = inner.iop_pdg.pop_front().expect("Received IOp Ack without IOp pending");
-                    let dur_time = unit::Time::from(cur_tick() - start_tick).rescale();
-                    println!("Exec report for {iop} [{dur_time}]");
+                    let iop = inner.iop_pdg.pop_front().expect("Received IOp Ack without IOp pending");
+                    assert_eq!(iop.to_words(), iop_pld.inner.to_words(), "Mismatch between IOpPayload content and local store");
                     (hid, iop)
                 };
+                let iop_header_hex = iop.to_words()[0];
                 self.clone().flush_dst_ldq(iop.get_iid()).await
                     .expect("Error while flush Dst Store queue");
 
@@ -369,7 +377,7 @@ impl UCore {
 
                 // write body
                 self.mem
-                    .write(self.properties(), chunk_start, &dop_hex)
+                    .write(self.properties(), chunk_start, &iop_header_hex)
                     .await
                     .expect("Error while reading Ackq body");
 
@@ -435,13 +443,24 @@ impl UCore {
                    }
 
                    inner.cur_iid = iop.get_iid();
-                   inner.iop_pdg.push_back((cur_tick(), iop.clone()));
+                   inner.iop_pdg.push_back(iop.clone());
                    event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
                 }
 
+                // Update context in HpuCore
+                let iop_pkt = {
+                    let mut pld = IOpPayload::new(iop.clone());
+                    // Insert creator uuid and timestamp
+                    pld.wrap_up(*self.props.uid());
+                    Packet::wrap_payload(pld, Default::default())
+                };
+                self.hpu_ctx.send_pkt(iop_pkt).await
+                    .expect("Issue with ucore iop context update");
+                
+
                 // Retrived DOp stream from memory
                 let dops = self.load_fw(&iop).await;
-                // handle Dop
+                // handle Dops
                 self.clone()
                     .exec_or_deferred(&iop, &dops)
                     .await
@@ -949,5 +968,31 @@ impl UCore {
         }
         // Notify to wake up pending task
         event::Event::triggered(&forge_event_name!(|self| "sync_evt"), None);
+    }
+}
+
+impl UCore {
+    fn dump_iop_report(&self, pld: &IOpPayload) {
+        println!("Executed IOp: {} in {}[{} batch_timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len()); 
+        println!("{pld}");
+
+        let trace_folder = Output::get_trace_folder();
+        let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
+
+        // Generate executed DOp order
+        let iopcode = pld.inner.opcode().0;
+
+        let asm_p = format!("{}/dop/dop_executed_{iopcode:0>2x}.asm", trace_path.to_str().unwrap());
+        let hex_p = format!("{}/dop/dop_executed_{iopcode:0>2x}.hex",trace_path.to_str().unwrap());
+        let dop_prog = hpu_asm::Program::new(
+            pld.exec_order
+                .iter()
+                .map(|op| hpu_asm::AsmOp::Stmt(op.clone()))
+                .collect::<Vec<_>>(),
+        );
+        dop_prog.write_asm(&asm_p).unwrap();
+        dop_prog.write_hex(&hex_p).unwrap();
+
+        // TODO add other report
     }
 }

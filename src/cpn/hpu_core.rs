@@ -12,8 +12,8 @@ use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
-use super::DOpPayload;
-use std::collections::{BinaryHeap, HashMap};
+use super::{DOpPayload, IOpPayload};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use hpu_asm::ToHex;
@@ -62,7 +62,12 @@ struct HpuCoreInner {
     /// On-chip regfile
     regfile: Vec<HpuLweCiphertextOwned<u64>>,
     /// Program counter
-    pc: usize,
+    refilled_pc: usize,
+    issued_pc: usize,
+    retired_pc: usize,
+
+    /// IOp context
+    iop_ctx: VecDeque<IOpPayload>,
 
     /// Simulation perf model
     /// Bridge Hpu internal perf model inherited from hpu_compiler
@@ -94,6 +99,8 @@ impl HpuCoreInner {
         let regfile = (0..params.compute_params.regf_params.reg_nb)
             .map(|_| HpuLweCiphertextOwned::new(0, params.compute_params.clone()))
             .collect::<Vec<_>>();
+
+        let iop_ctx = VecDeque::new();
         let sim_model = hpu_sim::Hpu::new(&params.sim_config.clone());
         let sim_event = HpuEventStore::new(ra2m_clk_d);
         let sim_tracer = Tracer::new();
@@ -104,7 +111,7 @@ impl HpuCoreInner {
                 params.hbm_global_ofst + pc * params.hbm_pc_ofst
             },
         };
-        Self { regfile, pc: 0, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
+        Self { regfile, refilled_pc: 0, issued_pc:0, retired_pc:0, iop_ctx, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
     }
 }
 
@@ -117,12 +124,16 @@ pub struct HpuCore {
     #[port]
     mem: port::ReqRespPort<membus::MemBus>,
 
+    /// iop_ctx: Received IOp context
+    /// Use to construct correct report
+    #[port]
+    ctx: port::SlavePort<IOpPayload>,
     /// req: Received DOp request
     #[port]
     req: port::SlavePort<DOpPayload>,
     /// outbound: Send DOp Ack
     #[port]
-    ack: port::MasterPort<DOpPayload>,
+    ack: port::MasterPort<IOpPayload>,
     prc: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     inner: Mutex<HpuCoreInner>,
@@ -133,6 +144,7 @@ impl HpuCore {
         let props = Arc::new(props);
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
+            ctx: port::SlavePort::new("ctx", props.clone(), None, None),
             req: port::SlavePort::new("req", props.clone(), None, None),
             ack: port::MasterPort::new("ack", props.clone(), None, None),
             prc: Mutex::new(Vec::new()),
@@ -146,7 +158,9 @@ impl HpuCore {
     fn _init(self: Arc<Self>) {
         let mut prc = self.prc.lock().unwrap();
         let asc = self.clone();
-        prc.push(spawn_prc!(Self::loopback(asc)));
+        prc.push(spawn_prc!(Self::ctx_feed(asc)));
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::inner_feed(asc)));
         let asc = self.clone();
         prc.push(spawn_prc!(Self::simulate_inner(asc)));
     }
@@ -164,7 +178,22 @@ impl HpuCore {
 }
 
 impl HpuCore {
-    async fn loopback(self: Arc<Self>) {
+    async fn ctx_feed(self: Arc<Self>) {
+        loop {
+            let iop = self
+                .ctx
+                .wait_pkt()
+                .await
+                .unwrap_payload();
+
+            // Insert IOp in local context
+            {
+                let mut inner = self.inner.lock().unwrap();
+                inner.iop_ctx.push_back(iop);
+            }
+        }
+    }
+    async fn inner_feed(self: Arc<Self>) {
         loop {
             let dop = self
                 .req
@@ -176,11 +205,11 @@ impl HpuCore {
             // Insert DOp is hpu_sim model
             {
                 let mut inner = self.inner.lock().unwrap();
-                let compiler_dop = into_compiler_view(inner.pc, &dop.inner);
+                let compiler_dop = into_compiler_view(inner.refilled_pc, &dop.inner);
                 inner.dop_map.insert(compiler_dop.id, dop);
                 inner.sim_event.dispatch(hpu_sim::Events::IscPushDOps(vec![compiler_dop]), None);
                 // Increment program counter
-                inner.pc += 1;
+                inner.refilled_pc += 1;
                 event::Event::triggered(&forge_event_name!(|self| "SimInnerPushDOp"), None);
             }
 
@@ -213,6 +242,7 @@ impl HpuCore {
                 let mut deferred_exec = Vec::new();
                 let mut deferred_retire = Vec::new();
                 let mut deferred_trace = Vec::new();
+                let mut deferred_timeout= Vec::new();
                 loop {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map, ..}= *inner;
@@ -270,8 +300,7 @@ impl HpuCore {
                                     }
                                     },
                                     hpu_sim::Events::NotifyStartOnTimeout{last_in} => {
-                                        println!("Dop start on timeout {last_in}");
-                                        // TODO add counter and report number of timeout per IOp
+                                        deferred_timeout.push(last_in.id);
                                     }
                                     _ => {/*Nothing to do with other event*/},
                             }
@@ -291,6 +320,13 @@ impl HpuCore {
                     if !self.params.noops {
                         self.exec(dop_id).await.expect("Error with DOp execution");
                     }
+                }
+
+                // Deferred timeout
+                // Only here for report purpose
+                if !deferred_timeout.is_empty(){
+                    self.inner.lock().unwrap().iop_ctx[0].batch_timeout.append(&mut deferred_timeout);
+
                 }
 
                 // Deferred retired
@@ -376,11 +412,16 @@ impl HpuCore {
         // => All request across the architecture is made in untimed mode
         let untimed_options = PacketOptions{timed: false,..Default::default()};
         let dop_inner = {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             let dop = inner.dop_map.get(&dop_id).expect("Invalid DOpId");
-            log!(|self| log::Category::Own, log::Verbosity::Debug => inner.pc, dop);
-            dop.inner.clone()
+            log!(|self| log::Category::Own, log::Verbosity::Debug => inner.issued_pc, dop);
+            let dop_inner = dop.inner.clone();
+
+            // Update IOp execution order
+            inner.iop_ctx[0].exec_order.push(dop_inner.clone());
+            dop_inner
         };
+
 
         // Read operands
         match &dop_inner {
@@ -623,18 +664,19 @@ impl HpuCore {
         }
         // Dump operation src/dst in file if required
         self.dump_op_reg(&dop_inner);
+
+        // Update issued_pc
+        self.inner.lock().unwrap().issued_pc += 1;
         Ok(())
     }
 
-    async fn retire(&self, dop: DOpPayload) -> Result<(), anyhow::Error> {
+    async fn retire(&self,  mut dop: DOpPayload) -> Result<(), anyhow::Error> {
         {
             let inner = self.inner.lock().unwrap();
-            log!(|self| log::Category::Own, log::Verbosity::Debug => inner.pc, dop);
+            log!(|self| log::Category::Own, log::Verbosity::Debug => inner.retired_pc, dop);
         }
 
-        let dop_inner = dop.inner.clone();
-        // Read operands
-        match &dop_inner {
+        match &dop.inner {
             hpu_asm::DOp::SYNC(_) => {
                 if self.params.sim_trace {
                     let mut inner = self.inner.lock().unwrap();
@@ -642,57 +684,23 @@ impl HpuCore {
                     sim_model.report(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), sim_tracer);
                 }
 
+                // Retrieved Current IOp context
+                let iop = self.inner.lock().unwrap().iop_ctx.pop_front().expect("Sync received without associated context");
+
+
                 // Push ack in stream
-                let ack_pkt = Packet::wrap_payload(dop, PacketOptions{timed: false, ..Default::default()});
+                let ack_pkt = Packet::wrap_payload(iop, PacketOptions{timed: false, ..Default::default()});
                 self.ack.fwd_pkt(ack_pkt).await;
 
-                // Generate executed DOp order
-                // TODO enable back report
-                // #[cfg(feature = "isc-order-check")]
-                // if let Some(dump_path) = self.options.dump_out.as_ref() {
-                //     let iopcode = iop.opcode().0;
-
-                //     let asm_p = format!("{dump_path}/dop/dop_executed_{iopcode:0>2x}.asm");
-                //     let hex_p = format!("{dump_path}/dop/dop_executed_{iopcode:0>2x}.hex");
-                //     let dop_prog = hpu_asm::Program::new(
-                //         self.dops_exec_order
-                //             .iter()
-                //             .map(|op| hpu_asm::AsmOp::Stmt(op.clone()))
-                //             .collect::<Vec<_>>(),
-                //     );
-                //     dop_prog.write_asm(&asm_p).unwrap();
-                //     dop_prog.write_hex(&hex_p).unwrap();
-                // }
-
-                // TODO enable back report
-                // // Generate report
-                // let time_rpt = self.isc.time_report();
-                // let dop_rpt = self.isc.dop_report();
-                // let pe_rpt = self.isc.pe_report();
-                // tracing::info!("Report for IOp: {}", iop);
-                // tracing::info!("{time_rpt:?}");
-                // tracing::info!("{dop_rpt}");
-                // tracing::info!("{pe_rpt}");
-
-                // if let Some(mut rpt_file) = self.options.report_file((&iop).into()) {
-                //     writeln!(rpt_file, "Report for IOp: {}", iop).unwrap();
-                //     writeln!(rpt_file, "{time_rpt:?}").unwrap();
-                //     writeln!(rpt_file, "{dop_rpt}").unwrap();
-                //     writeln!(rpt_file, "{pe_rpt}").unwrap();
-                // }
-
-                // TODO enable back trace
-                // -> Use ra2m trace feature
-                // let trace = self.isc.reset_trace();
-                // trace.iter().for_each(|pt| tracing::trace!("{pt}"));
-                // if let Some(mut trace_file) = self.options.report_trace((&iop).into()) {
-                //     let json_string =
-                //         serde_json::to_string(&trace).expect("Could not serialize trace");
-                //     writeln!(trace_file, "{}", json_string).unwrap();
-                // }
             }
             _ => {}
         }
+
+        // Dump DOpPayload to trace
+        trace!(|self| trace::Kind::Pipeline => dop);
+        // Update retired_pc
+        self.inner.lock().unwrap().retired_pc += 1;
+
         Ok(())
     }
 
@@ -1040,7 +1048,7 @@ impl HpuCore {
                 let inner = self.inner.lock().unwrap();
                 let regf = inner.regfile[regid].as_view();
 
-                let base_path = format!("{}/blwe/run/blwe_isc{}_reg", trace_path.to_str().unwrap(), inner.pc,);
+                let base_path = format!("{}/blwe/run/blwe_isc{}_reg", trace_path.to_str().unwrap(), inner.issued_pc,);
                 self.dump_regf(regf, &base_path);
             }
         }

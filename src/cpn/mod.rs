@@ -25,6 +25,56 @@ pub const HBM_KSK_PC_MAX: usize = 16;
 
 //Common type use as cpn interface.
 // Thin wrapper around tfhe_hpu_backend type with extra trait for simulation logging/tracing
+/// Carry lifetime information for DOp
+#[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
+#[history(trace)]
+pub struct IOpPayload {
+    inner: hpu_asm::IOp,
+    // inner assembly view as String
+    // Use for tracing only, since we cannot implement foreign trait Traceable on foreign type DOp
+    #[trace]
+    asm_view: String,
+
+    /// Timeout logging
+    batch_timeout: Vec<hpuc_sim::hpu::DOpId>,
+    exec_order: Vec<hpu_asm::DOp>,
+
+    /// Contain history of the handling information of a given access through its route across the
+    /// architecture (From the requester up to the responder and back for acknowledgement)
+    trace: types::History,
+}
+
+impl IOpPayload {
+    pub fn new(iop: hpu_asm::IOp) -> Self {
+        let asm_view = iop.to_string();
+        Self {
+            inner: iop,
+            asm_view,
+            trace: Default::default(),
+            batch_timeout: Vec::new(),
+            exec_order: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for IOpPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IOpPayload {} [{}]", self.asm_view, self.trace)
+    }
+}
+
+impl TxStatus for IOpPayload {
+    fn tx_check(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+impl RxStatus for IOpPayload {
+    fn rx_check(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+
+/// Carry lifetime information for DOp
 #[derive(Debug, serde::Serialize, serde::Deserialize, Trace)]
 #[history(trace)]
 #[trace_custom(IscCommand)]

@@ -83,6 +83,7 @@ impl HpuNode {
             inner.child_properties("hpu_core", Default::default()),
         )));
         inner.inner_bind("hpu_core::mem", "xbar::inbound")?;
+        inner.inner_bind("ucore::hpu_ctx", "hpu_core::ctx")?;
         inner.inner_bind("ucore::hpu_req", "hpu_core::req")?;
         inner.inner_bind("ucore::hpu_ack", "hpu_core::ack")?;
 
