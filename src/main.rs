@@ -12,7 +12,7 @@ use hpu_sim::{
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
 
-static OUTPUT_FOLDER: &'static str = "/tmp/hpu_sim";
+static OUTPUT_FOLDER: &str = "/tmp/hpu_sim";
 
 /// Define CLI arguments
 use clap::Parser;
@@ -167,7 +167,7 @@ fn elaborate(
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
             bsk_pc: config.board.bsk_pc.clone(),
-            trace_pc: config.board.trace_pc.clone(),
+            trace_pc: config.board.trace_pc,
             trace_depth: config.board.trace_depth,
             hbm_global_ofst: 0x40_0000_0000,
             hbm_pc_ofst: 0x2000_0000,
@@ -281,7 +281,7 @@ fn elaborate(
 }
 
 async fn simulate(model: module::Area, args: &Args) -> Result<(), anyhow::Error> {
-    Output::init("/tmp/hpu_sim");
+    Output::init(OUTPUT_FOLDER);
     // Create global simulation state and custom scheduler for hardware task
     let mut sched = init_simulation(0, args.timescale, args.timing_mode, 1024);
 

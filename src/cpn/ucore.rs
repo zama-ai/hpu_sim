@@ -5,7 +5,7 @@ use ra2m::prelude::{
     protocol::{addr::{Addr, Pattern}, dma::DmaBus, membus::MemBus, network::Network},
     *,
 };
-use tfhe::tfhe_hpu_backend::{asm::ToHex, prelude::*};
+use tfhe::tfhe_hpu_backend::prelude::*;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -397,13 +397,7 @@ impl UCore {
             // Extract one Iop from stream
             let iop_pdg = {
                 let iop_stream = &mut self.inner.lock().unwrap().iop_stream;
-                match hpu_asm::IOp::from_words(iop_stream) {
-                    Err(_) => {
-                        // not enough data to match
-                        None
-                    }
-                    Ok(iop) => Some(iop),
-                }
+                hpu_asm::IOp::from_words(iop_stream).ok()
             };
 
             if let Some(iop) = iop_pdg {
@@ -505,6 +499,7 @@ impl UCore {
     }
 
     /// Convert bytes offset/addr/size in words
+    #[allow(unused)]
     fn bytes_to_words<W>(words: usize) -> usize {
         words / std::mem::size_of::<W>()
     }
@@ -751,11 +746,11 @@ impl UCore {
                                         let tmp_cid = inner.b2b_pool.get_tagged(iop.get_iid());
 
                                         // Create associated DstLdOrder in the queue if it doesn't exist
-                                        match inner.dst_ldq.iter().enumerate().filter(|(_i, x)| {
+                                        match inner.dst_ldq.iter().enumerate().find(|(_i, x)| {
                                         x.iid == inner.cur_iid
                                         && x.operand == operand
                                         && x.cid == cid
-                                            }).next() {
+                                            }) {
                                                 Some(_) => {},
                                                 None => {
                                                     // Create associated entry.
@@ -973,9 +968,32 @@ impl UCore {
 
 impl UCore {
     fn dump_iop_report(&self, pld: &IOpPayload) {
-        println!("Executed IOp: {} in {}[{} batch_timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len()); 
+        // Display in console for user real-time inspection
+        println!("Executed IOp: {} in {} [{} timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len()); 
         println!("{pld}");
 
+        // Append in execution log for later analyses
+        {
+        let trace_folder = Output::get_trace_folder();
+        let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
+        let rpt_f = format!("{}/executed_iop.rpt", trace_path.to_str().unwrap());
+
+        let rpt_p= std::path::Path::new(&rpt_f);
+        if let Some(dir_p) = rpt_p.parent() {
+            std::fs::create_dir_all(dir_p).unwrap();
+        }
+
+        // Open file
+        let mut wr_f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(rpt_p).expect("Error: Unable to open rpt file in append mode");
+        writeln!(wr_f, "{}::{} [{} timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len())
+        .expect("Error: Unable to append to rpt file");
+        }
+
+        // Dump dop execution order for debug
         let trace_folder = Output::get_trace_folder();
         let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
 

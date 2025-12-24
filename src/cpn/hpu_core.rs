@@ -148,7 +148,7 @@ impl HpuCore {
             req: port::SlavePort::new("req", props.clone(), None, None),
             ack: port::MasterPort::new("ack", props.clone(), None, None),
             prc: Mutex::new(Vec::new()),
-            inner: Mutex::new(HpuCoreInner::new(&params, props.clock_domain().clone())),
+            inner: Mutex::new(HpuCoreInner::new(&params, *props.clock_domain())),
             params,
             props,
         }
@@ -266,7 +266,7 @@ impl HpuCore {
                                 hpu_sim::Events::NotifyIsc(dop_id, cmd) => {
                                     // Retrieved HpuDop from id
                                     let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
-                                    dop.append_handler(types::Handler::custom(*self.props.uid(), cmd.clone()));
+                                    dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
                                     // TODO move to dedicated trace_log file ?!
                                     // println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
 
@@ -334,7 +334,7 @@ impl HpuCore {
                     self.retire(dop).await.expect("Error with DOp retire");
                 }
                 // Deferred trace generation in trace_memory
-                if 0 != deferred_trace.len() {
+                if !deferred_trace.is_empty() {
                     // Update trace_offset for next round
                     let addr = {
                         let mut inner = self.inner.lock().unwrap();
@@ -676,24 +676,21 @@ impl HpuCore {
             log!(|self| log::Category::Own, log::Verbosity::Debug => inner.retired_pc, dop);
         }
 
-        match &dop.inner {
-            hpu_asm::DOp::SYNC(_) => {
-                if self.params.sim_trace {
-                    let mut inner = self.inner.lock().unwrap();
-                    let HpuCoreInner{ref mut sim_model, ref mut sim_tracer,..}= *inner;
-                    sim_model.report(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), sim_tracer);
-                }
-
-                // Retrieved Current IOp context
-                let iop = self.inner.lock().unwrap().iop_ctx.pop_front().expect("Sync received without associated context");
-
-
-                // Push ack in stream
-                let ack_pkt = Packet::wrap_payload(iop, PacketOptions{timed: false, ..Default::default()});
-                self.ack.fwd_pkt(ack_pkt).await;
-
+        if let hpu_asm::DOp::SYNC(_) = &dop.inner {
+            if self.params.sim_trace {
+                let mut inner = self.inner.lock().unwrap();
+                let HpuCoreInner{ref mut sim_model, ref mut sim_tracer,..}= *inner;
+                sim_model.report(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), sim_tracer);
             }
-            _ => {}
+
+            // Retrieved Current IOp context
+            let iop = self.inner.lock().unwrap().iop_ctx.pop_front().expect("Sync received without associated context");
+
+
+            // Push ack in stream
+            let ack_pkt = Packet::wrap_payload(iop, PacketOptions{timed: false, ..Default::default()});
+            self.ack.fwd_pkt(ack_pkt).await;
+
         }
 
         // Dump DOpPayload to trace
@@ -1107,7 +1104,7 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
 
       // Extract targeted cycle
       let pop_at = if let Some(hpuc_sim::Trigger{at,..}) = self.triggers.peek() { 
-          at.clone()
+          *at
       } else {// early return
           return batch;
       };
@@ -1143,14 +1140,12 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .find(|hpuc_sim::Trigger{ at, event: e }| (e == event) && (at == filter_at))
-                .is_some()
+                .any(|hpuc_sim::Trigger{ at, event: e }| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
                 .map(|trigger| &trigger.event)
-                .find(|e| *e == event)
-                .is_some()
+                .any(|e| e == event)
         }
 
     }

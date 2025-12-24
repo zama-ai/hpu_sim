@@ -58,7 +58,7 @@ impl std::str::FromStr for ComputeParamsName {
 impl From<&ComputeParamsName> for HpuParameters {
     fn from(name: &ComputeParamsName) -> Self {
         fn from_raw_string(name: &ComputeParamsName, toml_str: &str) -> HpuParameters {
-            match toml::from_str(&toml_str) {
+            match toml::from_str(toml_str) {
                 Ok(cfg) => cfg,
                 Err(err) => panic!("Error in toml_str {name:?}: {err}"),
             }

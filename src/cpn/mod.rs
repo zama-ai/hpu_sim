@@ -222,15 +222,14 @@ impl IscTrace {
     }
 
     pub fn to_words(&self) -> Vec<u32> {
-        let mut words = Vec::new();
-
-        words.push(self.state.flags.0);
-        words.push(self.state.wr_lock);
-        words.push(self.state.rd_lock);
-        words.push(self.state.issue_lock);
-        words.push(self.state.sync_id);
-        words.push(self.insn);
-        words.push(self.timestamp);
-        words
+        vec![
+            self.state.flags.0,
+            self.state.wr_lock,
+            self.state.rd_lock,
+            self.state.issue_lock,
+            self.state.sync_id,
+            self.insn,
+            self.timestamp,
+        ]
     }
 }
