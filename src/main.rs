@@ -231,7 +231,7 @@ fn elaborate(
             forward_latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 25.GB_s(),
         },
-        ipc: ra2m_cpn::ffi::ipc::H2sBridgeParams {
+        ipc: ra2m_cpn::ffi_bridge::ipc::H2sBridgeParams {
             ipc_path: "".to_string(),
             addr_range: (0, 384.GiB()),
             inflight_req: 10,

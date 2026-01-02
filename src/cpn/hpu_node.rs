@@ -11,7 +11,7 @@
 
 use ra2m::prelude::anyhow::Error;
 use ra2m::prelude::*;
-use ra2m::ra2m_cpn::{ffi, mem, net};
+use ra2m::ra2m_cpn::{ffi_bridge, mem, net};
 
 use super::*;
 
@@ -25,7 +25,7 @@ pub struct HpuNodeParams {
     pub ddr: mem::NpRamParams,
     pub hbm: mem::NpRamParams,
     pub dma: net::NDmaParams<u8>,
-    pub ipc: ffi::ipc::H2sBridgeParams,
+    pub ipc: ffi_bridge::ipc::H2sBridgeParams,
 }
 
 pub struct HpuNode {
@@ -115,7 +115,7 @@ impl HpuNode {
         // Hpu Host FFI
         // ===================================================================
         // Create Host to Sim bridge
-        inner.insert_module(Arc::new(ffi::ipc::H2sBridge::new(
+        inner.insert_module(Arc::new(ffi_bridge::ipc::H2sBridge::new(
             params.ipc.clone(),
             inner.child_properties("H2sBridge", Default::default()),
         )));
