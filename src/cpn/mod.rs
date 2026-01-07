@@ -7,8 +7,6 @@ pub mod hpu_core;
 pub use hpu_core::{HpuCore, HpuCoreParams, IscCommand};
 pub mod hpu_node;
 pub use hpu_node::{HpuNode, HpuNodeParams};
-pub mod hpu_cluster;
-pub use hpu_cluster::{HpuCluster, HpuClusterParams};
 pub mod ucore;
 pub use ucore::{UCore, UCoreParams};
 
@@ -201,14 +199,12 @@ impl IscTrace {
             }
         };
         let insn = if let Some(word) = stream.get(peak_words) {
-            peak_words += 1;
             *word
         } else {
             return Err(TraceParsingError::EmptyStream);
         };
 
         let timestamp = if let Some(word) = stream.get(peak_words) {
-            peak_words += 1;
             *word
         } else {
             return Err(TraceParsingError::EmptyStream);

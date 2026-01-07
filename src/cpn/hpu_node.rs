@@ -29,6 +29,7 @@ pub struct HpuNodeParams {
 }
 
 pub struct HpuNode {
+    #[allow(unused)]
     params: HpuNodeParams,
     inner: Arc<module::Area>,
 }

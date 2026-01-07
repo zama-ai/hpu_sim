@@ -1084,7 +1084,6 @@ impl UCore {
             // Open file
             let mut wr_f = std::fs::OpenOptions::new()
                 .create(true)
-                .write(true)
                 .append(true)
                 .open(rpt_p)
                 .expect("Error: Unable to open rpt file in append mode");
