@@ -1,9 +1,9 @@
 //! Depict Hpu computation core
 
-use hpuc_sim::hpu as hpu_sim;
 pub use hpu_sim::IscCommand;
 use hpuc_langs;
-use hpuc_sim::{Simulatable, Dispatch, Tracer};
+use hpuc_sim::hpu as hpu_sim;
+use hpuc_sim::{Dispatch, Simulatable, Tracer};
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
 use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
@@ -26,7 +26,7 @@ pub struct HpuCoreParams {
     // Performance config for simulation model
     pub sim_config: hpu_sim::HpuConfig,
     // Enable hpuc_sim tracing feature
-    pub sim_trace: bool, 
+    pub sim_trace: bool,
 
     /// Do trivial computation
     pub trivial: bool,
@@ -54,7 +54,6 @@ pub struct HpuCoreParams {
     pub hbm_global_ofst: usize,
     // Hbm pc offset for Dma xfer addr computation
     pub hbm_pc_ofst: usize,
-
 }
 
 /// Store internal state of HpuCore module
@@ -81,7 +80,6 @@ struct HpuCoreInner {
     /// Trace memory is written word by word in a wrapping manner
     trace_offset: usize,
 
-    
     /// Tfhe server keys
     /// Read from memory after bsk_avail/ksk_avail register are set
     /// Conversion from Hpu->Cpu is costly. Thuse store it in the object to prevent extra
@@ -107,11 +105,21 @@ impl HpuCoreInner {
         let dop_map = HashMap::new();
         let trace_offset = match params.trace_pc {
             MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { pc } => {
-                params.hbm_global_ofst + pc * params.hbm_pc_ofst
-            },
+            MemKind::Hbm { pc } => params.hbm_global_ofst + pc * params.hbm_pc_ofst,
         };
-        Self { regfile, refilled_pc: 0, issued_pc:0, retired_pc:0, iop_ctx, sim_model, sim_event, sim_tracer,  dop_map, trace_offset, sks: None}
+        Self {
+            regfile,
+            refilled_pc: 0,
+            issued_pc: 0,
+            retired_pc: 0,
+            iop_ctx,
+            sim_model,
+            sim_event,
+            sim_tracer,
+            dop_map,
+            trace_offset,
+            sks: None,
+        }
     }
 }
 
@@ -172,7 +180,10 @@ impl HpuCore {
             let trace_folder = Output::get_trace_folder();
             let trace_path = trace_folder.join(std::path::Path::new(&filename));
             let inner = self.inner.lock().unwrap();
-            inner.sim_tracer.dump(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),  trace_path);
+            inner.sim_tracer.dump(
+                hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                trace_path,
+            );
         }
     }
 }
@@ -180,11 +191,7 @@ impl HpuCore {
 impl HpuCore {
     async fn ctx_feed(self: Arc<Self>) {
         loop {
-            let iop = self
-                .ctx
-                .wait_pkt()
-                .await
-                .unwrap_payload();
+            let iop = self.ctx.wait_pkt().await.unwrap_payload();
 
             // Insert IOp in local context
             {
@@ -207,21 +214,29 @@ impl HpuCore {
                 let mut inner = self.inner.lock().unwrap();
                 let compiler_dop = into_compiler_view(inner.refilled_pc, &dop.inner);
                 inner.dop_map.insert(compiler_dop.id, dop);
-                inner.sim_event.dispatch(hpu_sim::Events::IscPushDOps(vec![compiler_dop]), None);
+                inner
+                    .sim_event
+                    .dispatch(hpu_sim::Events::IscPushDOps(vec![compiler_dop]), None);
                 // Increment program counter
                 inner.refilled_pc += 1;
                 event::Event::triggered(&forge_event_name!(|self| "SimInnerPushDOp"), None);
             }
-
-
         }
     }
     async fn simulate_inner(self: Arc<Self>) {
         {
             let mut inner = self.inner.lock().unwrap();
-            let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer,..}= *inner;
+            let HpuCoreInner {
+                ref mut sim_model,
+                ref mut sim_event,
+                ref mut sim_tracer,
+                ..
+            } = *inner;
             sim_model.power_up(sim_event);
-            sim_model.report(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), sim_tracer);
+            sim_model.report(
+                hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                sim_tracer,
+            );
         }
 
         loop {
@@ -231,79 +246,115 @@ impl HpuCore {
                 inner.sim_event.pop_batch()
             };
 
-            if !batch_trigger.is_empty(){
+            if !batch_trigger.is_empty() {
                 // Wait for real simulation to match sim_model
                 // And keep track of time for later delta-cycle resolution
                 let delta_cycle = batch_trigger[0].at;
-                delay::Delay::wait_until(self.props.clock_domain().into_tick(delta_cycle.0.cycles())).await;
+                delay::Delay::wait_until(
+                    self.props.clock_domain().into_tick(delta_cycle.0.cycles()),
+                )
+                .await;
 
                 // Resolve delta-cycle
                 // NB: use to deffered queue for async tasks. Ease handling of inner mutex
                 let mut deferred_exec = Vec::new();
                 let mut deferred_retire = Vec::new();
                 let mut deferred_trace = Vec::new();
-                let mut deferred_timeout= Vec::new();
+                let mut deferred_timeout = Vec::new();
                 loop {
                     let mut inner = self.inner.lock().unwrap();
-                    let HpuCoreInner{ref mut sim_model, ref mut sim_event,ref mut sim_tracer, ref mut dop_map, ..}= *inner;
+                    let HpuCoreInner {
+                        ref mut sim_model,
+                        ref mut sim_event,
+                        ref mut sim_tracer,
+                        ref mut dop_map,
+                        ..
+                    } = *inner;
 
                     // Apply all trigger to sim_model
                     for trigger in batch_trigger.iter() {
                         // Populate hpuc simulation trace
                         if self.params.sim_trace {
-                            sim_tracer.add_event(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), &trigger.event);
+                            sim_tracer.add_event(
+                                hpuc_sim::Cycle(
+                                    self.props.clock_domain().from_tick(cur_tick()).into(),
+                                ),
+                                &trigger.event,
+                            );
                         }
                         // Handle event in inner hpuc simulation model
                         sim_model.handle(sim_event, trigger.clone());
                     }
 
-
                     // Hook back side effects in main simulation
                     while let Some(trigger) = batch_trigger.pop() {
-                            // let mut inner = self.inner.lock().unwrap();
-                            // let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
-                            match trigger.event {
-                                hpu_sim::Events::NotifyIsc(dop_id, cmd) => {
-                                    // Retrieved HpuDop from id
-                                    let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| panic!("Event registered on unknown DOpId {}", dop_id));
-                                    dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
-                                    // TODO move to dedicated trace_log file ?!
-                                    // println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
+                        // let mut inner = self.inner.lock().unwrap();
+                        // let HpuCoreInner{ref mut sim_model, ref mut dop_map,..}= *inner;
+                        match trigger.event {
+                            hpu_sim::Events::NotifyIsc(dop_id, cmd) => {
+                                // Retrieved HpuDop from id
+                                let dop = dop_map.get_mut(&dop_id).unwrap_or_else(|| {
+                                    panic!("Event registered on unknown DOpId {}", dop_id)
+                                });
+                                dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
+                                // TODO move to dedicated trace_log file ?!
+                                // println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
 
-                                    // Append Hw trace data to deferred list
-                                    let props = sim_model.scheduler.get_slot_properties(dop_id).unwrap_or(Default::default());
-                                    let trace = isc_trace::IscTrace{ state: isc_trace::IscPoolState{pdg:props.pdg,rd_pdg: props.rd_pdg,vld:props.vld, cmd:match cmd {
-                                        IscCommand::None => isc_trace::IscCommand::None,
-                                        IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
-                                        IscCommand::Retire => isc_trace::IscCommand::Retire,
-                                        IscCommand::Refill => isc_trace::IscCommand::Refill,
-                                        IscCommand::Issue => isc_trace::IscCommand::Issue,
-                                    }, wr_lock: props.wr_lock, rd_lock: props.rd_lock, issue_lock: props.issue_lock, sync_id: 0 }, insn_hex: dop.inner.to_hex(), insn_asm: None, timestamp: usize::from(self.props.clock_domain().from_tick(cur_tick())) as u32};
-                                    deferred_trace.extend(trace.into_bytes());
-
-                                    // Register Deferred task if any
-                                    match cmd {
-                                        IscCommand::RdUnlock => {
-                                            //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
-                                            // to clutter the source operands. The dst register is then available in
-                                            // advance, but not used before it's real availability due to wr_lock.
-                                            // -> Another option would have been to buffer the source operands. However, due to the
-                                            // operands size, we had preferred to move the behavioral execution at the rd_unlock
-                                            // stage
-                                            deferred_exec.push(dop_id);
+                                // Append Hw trace data to deferred list
+                                let props = sim_model
+                                    .scheduler
+                                    .get_slot_properties(dop_id)
+                                    .unwrap_or(Default::default());
+                                let trace = isc_trace::IscTrace {
+                                    state: isc_trace::IscPoolState {
+                                        pdg: props.pdg,
+                                        rd_pdg: props.rd_pdg,
+                                        vld: props.vld,
+                                        cmd: match cmd {
+                                            IscCommand::None => isc_trace::IscCommand::None,
+                                            IscCommand::RdUnlock => isc_trace::IscCommand::RdUnlock,
+                                            IscCommand::Retire => isc_trace::IscCommand::Retire,
+                                            IscCommand::Refill => isc_trace::IscCommand::Refill,
+                                            IscCommand::Issue => isc_trace::IscCommand::Issue,
                                         },
-                                        IscCommand::Retire => {
-                                            let dop = dop_map.remove(&dop_id).unwrap_or_else(|| panic!("Tried to retired unknown DOpId {}", dop_id));
-                                            deferred_retire.push(dop);
-                                        },
-                                        _ => {/*Nothing to do is other cases */}
-                                    }
+                                        wr_lock: props.wr_lock,
+                                        rd_lock: props.rd_lock,
+                                        issue_lock: props.issue_lock,
+                                        sync_id: 0,
                                     },
-                                    hpu_sim::Events::NotifyStartOnTimeout{last_in} => {
-                                        deferred_timeout.push(last_in.id);
+                                    insn_hex: dop.inner.to_hex(),
+                                    insn_asm: None,
+                                    timestamp: usize::from(
+                                        self.props.clock_domain().from_tick(cur_tick()),
+                                    ) as u32,
+                                };
+                                deferred_trace.extend(trace.into_bytes());
+
+                                // Register Deferred task if any
+                                match cmd {
+                                    IscCommand::RdUnlock => {
+                                        //NB: Operation behavior is executed at the rd_unlock staage to prevent later operation
+                                        // to clutter the source operands. The dst register is then available in
+                                        // advance, but not used before it's real availability due to wr_lock.
+                                        // -> Another option would have been to buffer the source operands. However, due to the
+                                        // operands size, we had preferred to move the behavioral execution at the rd_unlock
+                                        // stage
+                                        deferred_exec.push(dop_id);
                                     }
-                                    _ => {/*Nothing to do with other event*/},
+                                    IscCommand::Retire => {
+                                        let dop = dop_map.remove(&dop_id).unwrap_or_else(|| {
+                                            panic!("Tried to retired unknown DOpId {}", dop_id)
+                                        });
+                                        deferred_retire.push(dop);
+                                    }
+                                    _ => { /*Nothing to do is other cases */ }
+                                }
                             }
+                            hpu_sim::Events::NotifyStartOnTimeout { last_in } => {
+                                deferred_timeout.push(last_in.id);
+                            }
+                            _ => { /*Nothing to do with other event*/ }
+                        }
                     }
 
                     // Refill batch_trigger with delta-cycle event (i.e. immediat event that must be resolved in-cycle)
@@ -324,9 +375,10 @@ impl HpuCore {
 
                 // Deferred timeout
                 // Only here for report purpose
-                if !deferred_timeout.is_empty(){
-                    self.inner.lock().unwrap().iop_ctx[0].batch_timeout.append(&mut deferred_timeout);
-
+                if !deferred_timeout.is_empty() {
+                    self.inner.lock().unwrap().iop_ctx[0]
+                        .batch_timeout
+                        .append(&mut deferred_timeout);
                 }
 
                 // Deferred retired
@@ -339,28 +391,32 @@ impl HpuCore {
                     let addr = {
                         let mut inner = self.inner.lock().unwrap();
                         let addr = inner.trace_offset;
-                        inner.trace_offset += std::mem::size_of::<u8>()* deferred_trace.len();
+                        inner.trace_offset += std::mem::size_of::<u8>() * deferred_trace.len();
                         addr
-                        };
+                    };
 
                     // Use explicit request to disable timed mode
                     let trace_req = membus::MemBus::new_wrapped(
-                            self.properties().uid(),
-                            membus::Command::Write,
-                            Addr::Phys(addr),
-                            Pattern::Simple(deferred_trace.len().Byte()),
-                            Some(&deferred_trace),
-                            Some(PacketOptions{timed: false,..Default::default()}),
-                        );
-                    let _resp = self.mem.b_req_resp(trace_req)
+                        self.properties().uid(),
+                        membus::Command::Write,
+                        Addr::Phys(addr),
+                        Pattern::Simple(deferred_trace.len().Byte()),
+                        Some(&deferred_trace),
+                        Some(PacketOptions {
+                            timed: false,
+                            ..Default::default()
+                        }),
+                    );
+                    let _resp = self
+                        .mem
+                        .b_req_resp(trace_req)
                         .await
                         .expect("Error while writing trace memory");
                 }
             } else {
-               event::Event::wait(&forge_event_name!(|self| "SimInnerPushDOp")).await;
+                event::Event::wait(&forge_event_name!(|self| "SimInnerPushDOp")).await;
             }
         }
-
     }
 }
 
@@ -376,7 +432,6 @@ use tfhe::core_crypto::entities::{
 use tfhe::core_crypto::hpu::glwe_lookuptable::create_hpu_lookuptable;
 use tfhe::core_crypto::prelude::*;
 use tfhe::shortint::parameters::KeySwitch32PBSParameters;
-
 
 impl HpuCore {
     fn trivial_decode<T: UnsignedInteger>(&self, body: T) -> T {
@@ -410,7 +465,10 @@ impl HpuCore {
         // Perf modeling is handled by hpu_compiler model
         // This function is only in charge of behavioral computation
         // => All request across the architecture is made in untimed mode
-        let untimed_options = PacketOptions{timed: false,..Default::default()};
+        let untimed_options = PacketOptions {
+            timed: false,
+            ..Default::default()
+        };
         let dop_inner = {
             let mut inner = self.inner.lock().unwrap();
             let dop = inner.dop_map.get(&dop_id).expect("Invalid DOpId");
@@ -422,10 +480,9 @@ impl HpuCore {
             dop_inner
         };
 
-
         // Read operands
         match &dop_inner {
-            hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_)=> {
+            hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_) => {
                 panic!("Error: DOp {dop_inner:?} must have been handled by Ucore")
             }
             hpu_asm::DOp::SYNC(_) => {}
@@ -435,14 +492,24 @@ impl HpuCore {
                     _ => panic!("Template must have been resolved before execution"),
                 };
 
-
                 //1. Issue Mem read requests
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
                 let mut ct_mem = Vec::new();
-                let mem_req= self.cid_to_addr(cid_ofst).into_iter().map(|addr| 
-                    membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read, addr, self.ct_pc_pattern(),None, Some(untimed_options))
-                ).collect::<Vec<_>>();
+                let mem_req = self
+                    .cid_to_addr(cid_ofst)
+                    .into_iter()
+                    .map(|addr| {
+                        membus::MemBus::new_wrapped(
+                            self.props.uid(),
+                            membus::Command::Read,
+                            addr,
+                            self.ct_pc_pattern(),
+                            None,
+                            Some(untimed_options),
+                        )
+                    })
+                    .collect::<Vec<_>>();
 
                 for req in mem_req.into_iter() {
                     let resp = self.mem.b_req_resp(req).await?;
@@ -456,10 +523,9 @@ impl HpuCore {
                     let mut inner = self.inner.lock().unwrap();
                     let dst = &mut inner.regfile[insn.rid.0 as usize];
 
-                    for (hpu_slice, mem_slice ) in std::iter::zip(
-                        dst.as_mut_view().into_container(),
-                        ct_mem,
-                    ) {
+                    for (hpu_slice, mem_slice) in
+                        std::iter::zip(dst.as_mut_view().into_container(), ct_mem)
+                    {
                         // NB: Chunk are extended to enforce page align buffer
                         // -> To prevent error during copy, with shrink the mem buffer to
                         // the real   size before-hand
@@ -470,11 +536,9 @@ impl HpuCore {
                     }
                 }
                 self.show_trivial_reg(insn.rid);
-                
             }
 
             hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(insn)) => {
-
                 //1. Read data inside regfile
                 // NB: Don't do both at same time (i.e. read in regfile and write in memory) to prevent having a Mutex lock
                 // across await points
@@ -494,24 +558,21 @@ impl HpuCore {
                 //2. Built request and write data in memory
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
-                for (hpu_slice, addr) in std::iter::zip(
-                    src.as_view().into_container(),
-                    ct_addrs,
-                ) {
+                for (hpu_slice, addr) in std::iter::zip(src.as_view().into_container(), ct_addrs) {
                     let data_u8 = bytemuck::cast_slice::<u64, u8>(hpu_slice);
 
                     let mem_req = membus::MemBus::new_wrapped(
                         self.props.uid(),
-                         membus::Command::Write,
+                        membus::Command::Write,
                         addr,
                         Pattern::Simple(data_u8.len().Byte()), // Only write used data, not the memory used for padding
                         Some(data_u8),
-                         Some(untimed_options));
+                        Some(untimed_options),
+                    );
 
-                     self.mem.b_req_resp(mem_req).await?;
+                    self.mem.b_req_resp(mem_req).await?;
                 }
                 self.show_trivial_reg(insn.rid);
-                
             }
 
             hpu_asm::DOp::ADD(op_impl) => {
@@ -526,7 +587,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::SUB(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src0_rid);
@@ -540,7 +600,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::MAC(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src0_rid);
@@ -559,7 +618,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::ADDS(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src_rid);
@@ -576,7 +634,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::SUBS(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src_rid);
@@ -593,7 +650,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::SSUB(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src_rid);
@@ -611,7 +667,6 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::MULS(op_impl) => {
                 self.show_trivial_reg(op_impl.0.src_rid);
@@ -627,39 +682,38 @@ impl HpuCore {
                 self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
 
                 self.show_trivial_reg(op_impl.0.dst_rid);
-                
             }
             hpu_asm::DOp::PBS(op_impl) => {
-                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML2(op_impl) => {
-                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML4(op_impl) => {
-                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML8(op_impl) => {
-                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_F(op_impl) => {
-                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML2_F(op_impl) => {
-                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML4_F(op_impl) => {
-                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
             hpu_asm::DOp::PBS_ML8_F(op_impl) => {
-                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid).await?;
-                
+                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
+                    .await?;
             }
         }
         // Dump operation src/dst in file if required
@@ -670,7 +724,7 @@ impl HpuCore {
         Ok(())
     }
 
-    async fn retire(&self,  mut dop: DOpPayload) -> Result<(), anyhow::Error> {
+    async fn retire(&self, mut dop: DOpPayload) -> Result<(), anyhow::Error> {
         {
             let inner = self.inner.lock().unwrap();
             log!(|self| log::Category::Own, log::Verbosity::Debug => inner.retired_pc, dop);
@@ -679,18 +733,35 @@ impl HpuCore {
         if let hpu_asm::DOp::SYNC(_) = &dop.inner {
             if self.params.sim_trace {
                 let mut inner = self.inner.lock().unwrap();
-                let HpuCoreInner{ref mut sim_model, ref mut sim_tracer,..}= *inner;
-                sim_model.report(hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()), sim_tracer);
+                let HpuCoreInner {
+                    ref mut sim_model,
+                    ref mut sim_tracer,
+                    ..
+                } = *inner;
+                sim_model.report(
+                    hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                    sim_tracer,
+                );
             }
 
             // Retrieved Current IOp context
-            let iop = self.inner.lock().unwrap().iop_ctx.pop_front().expect("Sync received without associated context");
-
+            let iop = self
+                .inner
+                .lock()
+                .unwrap()
+                .iop_ctx
+                .pop_front()
+                .expect("Sync received without associated context");
 
             // Push ack in stream
-            let ack_pkt = Packet::wrap_payload(iop, PacketOptions{timed: false, ..Default::default()});
+            let ack_pkt = Packet::wrap_payload(
+                iop,
+                PacketOptions {
+                    timed: false,
+                    ..Default::default()
+                },
+            );
             self.ack.fwd_pkt(ack_pkt).await;
-
         }
 
         // Dump DOpPayload to trace
@@ -706,7 +777,7 @@ impl HpuCore {
     /// NB: Current Pbs lookup function arn't reverted from Hbm memory
     /// TODO: Read PbsLut from Hbm instead of online generation based on Pbs Id
     async fn apply_pbs2reg(
-        & self,
+        &self,
         opcode_lut_nb: u8,
         dst_rid: hpu_asm::RegId,
         src_rid: hpu_asm::RegId,
@@ -778,26 +849,26 @@ impl HpuCore {
             }
         } else {
             let mut tfhe_lut = tfhe_lut;
-            self.with_server_key(|ksk, bfr_after_ks, bsk|
-            {
+            self.with_server_key(|ksk, bfr_after_ks, bsk| {
                 keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
 
-            let modulus_switch_type = self.params.compute_params.pbs_params.modulus_switch_type;
+                let modulus_switch_type = self.params.compute_params.pbs_params.modulus_switch_type;
 
-            let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
-            let bfr_after_ms = match modulus_switch_type {
-                HpuModulusSwitchType::Standard => {
-                    lwe_ciphertext_modulus_switch(bfr_after_ks.as_view(), log_modulus)
-                }
-                HpuModulusSwitchType::CenteredMeanNoiseReduction => {
-                    lwe_ciphertext_centered_binary_modulus_switch(
-                        bfr_after_ks.as_view(),
-                        log_modulus,
-                    )
-                }
-            };
+                let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
+                let bfr_after_ms = match modulus_switch_type {
+                    HpuModulusSwitchType::Standard => {
+                        lwe_ciphertext_modulus_switch(bfr_after_ks.as_view(), log_modulus)
+                    }
+                    HpuModulusSwitchType::CenteredMeanNoiseReduction => {
+                        lwe_ciphertext_centered_binary_modulus_switch(
+                            bfr_after_ks.as_view(),
+                            log_modulus,
+                        )
+                    }
+                };
                 blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, bsk);
-            }).await?;
+            })
+            .await?;
 
             assert_eq!(
                 dst_rid.0,
@@ -827,7 +898,6 @@ impl HpuCore {
         Ok(())
     }
 
-
     // NB: to prevent issues with borrow checker we have to clone the value from
     // the regfile. A clone is also required for conversion
     // Thus, directly cast value in Cpu version to prevent extra clone
@@ -841,7 +911,8 @@ impl HpuCore {
     /// Insert a cpu value into the register file
     fn cpu2reg(&self, reg_id: hpu_asm::RegId, cpu: LweCiphertextView<u64>) {
         let mut inner = self.inner.lock().unwrap();
-        let hpu = HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.compute_params.clone());
+        let hpu =
+            HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.compute_params.clone());
         std::iter::zip(
             inner.regfile[reg_id.0 as usize]
                 .as_mut_view()
@@ -858,20 +929,24 @@ impl HpuCore {
     async fn with_server_key(
         &self,
         f_on_sks: impl FnOnce(
-        &LweKeyswitchKeyOwned<u32>,
-        &mut LweCiphertextOwned<u32>,
-        &NttLweBootstrapKeyOwned<u64>,)
+            &LweKeyswitchKeyOwned<u32>,
+            &mut LweCiphertextOwned<u32>,
+            &NttLweBootstrapKeyOwned<u64>,
+        ),
     ) -> Result<(), anyhow::Error> {
-        let sks_is_none= {
+        let sks_is_none = {
             let inner = self.inner.lock().unwrap();
             inner.sks.is_none()
-                };
+        };
         // Retrieved key from memory in internal cache
         if sks_is_none {
             // Perf modeling is handled by hpu_compiler model
             // This function is only in charge of behavioral computation
             // => All request across the architecture is made in untimed mode
-            let untimed_options = PacketOptions{timed: false,..Default::default()};
+            let untimed_options = PacketOptions {
+                timed: false,
+                ..Default::default()
+            };
             log!(|self| log::Category::Own, log::Verbosity::Debug => => "Reload Bsk/Ksk from memory");
             // TODO check state of Bsk/Ksk in register
             // assert!(
@@ -890,32 +965,37 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = bsk.as_mut_view().into_container();
-                for (hpu, mem_kind) in 
-                std::iter::zip(hw_slice, self.params.bsk_pc.iter()){
+                for (hpu, mem_kind) in std::iter::zip(hw_slice, self.params.bsk_pc.iter()) {
+                    // View cache container as bytes
+                    let hpu_u8 = bytemuck::cast_slice_mut::<u64, u8>(hpu);
 
-                        // View cache container as bytes
-                        let hpu_u8= bytemuck::cast_slice_mut::<u64, u8>(hpu);
+                    let addr = Addr::Phys(match mem_kind {
+                        MemKind::Ddr { offset } => *offset,
+                        MemKind::Hbm { pc } => {
+                            self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst
+                        }
+                    });
 
-                        let addr= Addr::Phys(match mem_kind {
-                            MemKind::Ddr { offset } => *offset,
-                            MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst,
-                        });
+                    // TODO read offset from register
+                    // let ofst = {
+                    //     let [msb, lsb] = self.regmap.addr_offset().bsk[id];
+                    //     ((msb as usize) << 32) + lsb as usize
+                    // };
 
-                        // TODO read offset from register
-                        // let ofst = {
-                        //     let [msb, lsb] = self.regmap.addr_offset().bsk[id];
-                        //     ((msb as usize) << 32) + lsb as usize
-                        // };
+                    // Issue read request
+                    let mem_req = membus::MemBus::new_wrapped(
+                        self.props.uid(),
+                        membus::Command::Read,
+                        addr,
+                        Pattern::Simple(hpu_u8.len().Byte()),
+                        None,
+                        Some(untimed_options),
+                    );
 
-                        // Issue read request
-                        let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
-                                addr,
-                                        Pattern::Simple(hpu_u8.len().Byte()),None, Some(untimed_options));
-
-                            let resp = self.mem.b_req_resp(mem_req).await?;
-                            let data = resp.payload().data();
-                            hpu_u8.clone_from_slice(data.as_slice());
-                    }
+                    let resp = self.mem.b_req_resp(mem_req).await?;
+                    let data = resp.payload().data();
+                    hpu_u8.clone_from_slice(data.as_slice());
+                }
                 bsk
             };
             let hpu_ksk = {
@@ -924,30 +1004,36 @@ impl HpuCore {
 
                 // Copy content from Hbm
                 let hw_slice = ksk.as_mut_view().into_container();
-                for (hpu, mem_kind) in 
-                std::iter::zip(hw_slice, self.params.ksk_pc.iter()) {
-                        // View cache container as bytes
-                        let hpu_u8= bytemuck::cast_slice_mut::<u64, u8>(hpu);
+                for (hpu, mem_kind) in std::iter::zip(hw_slice, self.params.ksk_pc.iter()) {
+                    // View cache container as bytes
+                    let hpu_u8 = bytemuck::cast_slice_mut::<u64, u8>(hpu);
 
-                        let addr= Addr::Phys(match mem_kind {
-                            MemKind::Ddr { offset } => *offset,
-                            MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst,
-                        });
-                        // TODO read offset from register
-                        // let ofst = {
-                        //     let [msb, lsb] = self.regmap.addr_offset().ksk[id];
-                        //     ((msb as usize) << 32) + lsb as usize
-                        // };
+                    let addr = Addr::Phys(match mem_kind {
+                        MemKind::Ddr { offset } => *offset,
+                        MemKind::Hbm { pc } => {
+                            self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst
+                        }
+                    });
+                    // TODO read offset from register
+                    // let ofst = {
+                    //     let [msb, lsb] = self.regmap.addr_offset().ksk[id];
+                    //     ((msb as usize) << 32) + lsb as usize
+                    // };
 
-                        // Issue read request
-                        let mem_req = membus::MemBus::new_wrapped(self.props.uid(), membus::Command::Read,
-                                addr,
-                                        Pattern::Simple(hpu_u8.len().Byte()),None, Some(untimed_options));
+                    // Issue read request
+                    let mem_req = membus::MemBus::new_wrapped(
+                        self.props.uid(),
+                        membus::Command::Read,
+                        addr,
+                        Pattern::Simple(hpu_u8.len().Byte()),
+                        None,
+                        Some(untimed_options),
+                    );
 
-                            let resp = self.mem.b_req_resp(mem_req).await?;
-                            let data = resp.payload().data();
-                            hpu_u8.clone_from_slice(data.as_slice());
-                    }
+                    let resp = self.mem.b_req_resp(mem_req).await?;
+                    let data = resp.payload().data();
+                    hpu_u8.clone_from_slice(data.as_slice());
+                }
                 ksk
             };
 
@@ -968,8 +1054,8 @@ impl HpuCore {
 
         // Apply function with local cache key
         let mut inner = self.inner.lock().unwrap();
-            let (ksk, bfr_after_ks, bsk) = inner.sks.as_mut().unwrap();
-            f_on_sks(ksk, bfr_after_ks, bsk);
+        let (ksk, bfr_after_ks, bsk) = inner.sks.as_mut().unwrap();
+        f_on_sks(ksk, bfr_after_ks, bsk);
 
         Ok(())
     }
@@ -978,40 +1064,44 @@ impl HpuCore {
 // Definition of utilities function duplicated from Ucore
 // TODO try to fuse theme somewhere ?!
 impl HpuCore {
-
     /// Utility function to convert CtId in real Addr
     fn cid_to_addr(&self, cid: hpu_asm::CtId) -> Vec<Addr> {
-        let ct_chunk_size_b = 
-            page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.compute_params)
-                    .div_ceil(self.params.compute_params.pc_params.pem_pc)
-                    * std::mem::size_of::<u64>());
+        let ct_chunk_size_b = page_align(
+            hpu_big_lwe_ciphertext_size(&self.params.compute_params)
+                .div_ceil(self.params.compute_params.pc_params.pem_pc)
+                * std::mem::size_of::<u64>(),
+        );
         // Ct_ofst is equal over PC
-        let ct_ofst = cid.0 as usize
-            * ct_chunk_size_b;
+        let ct_ofst = cid.0 as usize * ct_chunk_size_b;
 
-        self.params.ct_pc.iter().map(|mem_kind| 
-            // WARN: this only work if ct_mem is allocated at begin of each channel
-            // TODO read offset from regmap register
-            
-            Addr::Phys(match mem_kind {
-                MemKind::Ddr { offset } => offset + ct_ofst,
-                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst + ct_ofst,
-            })).collect::<Vec<_>>()
+        self.params
+            .ct_pc
+            .iter()
+            .map(|mem_kind| {
+                // WARN: this only work if ct_mem is allocated at begin of each channel
+                // TODO read offset from regmap register
+
+                Addr::Phys(match mem_kind {
+                    MemKind::Ddr { offset } => offset + ct_ofst,
+                    MemKind::Hbm { pc } => {
+                        self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst + ct_ofst
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
     }
 
     /// Utility function to get hpu ciphertext pattern for one Pc
     fn ct_pc_pattern(&self) -> Pattern {
-        let ct_chunk_size_b = 
-            page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.compute_params)
-                    .div_ceil(self.params.compute_params.pc_params.pem_pc)
-                    * std::mem::size_of::<u64>());
+        let ct_chunk_size_b = page_align(
+            hpu_big_lwe_ciphertext_size(&self.params.compute_params)
+                .div_ceil(self.params.compute_params.pc_params.pem_pc)
+                * std::mem::size_of::<u64>(),
+        );
 
         Pattern::Simple(ct_chunk_size_b.Byte())
     }
 }
-
 
 impl HpuCore {
     fn dump_op_reg(&self, op: &hpu_asm::DOp) {
@@ -1045,7 +1135,11 @@ impl HpuCore {
                 let inner = self.inner.lock().unwrap();
                 let regf = inner.regfile[regid].as_view();
 
-                let base_path = format!("{}/blwe/run/blwe_isc{}_reg", trace_path.to_str().unwrap(), inner.issued_pc,);
+                let base_path = format!(
+                    "{}/blwe/run/blwe_isc{}_reg",
+                    trace_path.to_str().unwrap(),
+                    inner.issued_pc,
+                );
                 self.dump_regf(regf, &base_path);
             }
         }
@@ -1083,42 +1177,42 @@ impl HpuCore {
     }
 }
 
-
 // A set of structure used to bridge hpuc_sim simulation model within Ra2m
 // simulation kernel
-struct HpuEventStore<E: hpuc_sim::Event>{
+struct HpuEventStore<E: hpuc_sim::Event> {
     ra2m_clk_d: ClockDomain,
-    triggers: BinaryHeap<hpuc_sim::Trigger<E>>
+    triggers: BinaryHeap<hpuc_sim::Trigger<E>>,
 }
 
 impl<E: hpuc_sim::Event> HpuEventStore<E> {
     fn new(ra2m_clk_d: ClockDomain) -> Self {
-        Self{
+        Self {
             ra2m_clk_d,
-            triggers: BinaryHeap::new()
+            triggers: BinaryHeap::new(),
         }
     }
 
     fn pop_batch(&mut self) -> Vec<hpuc_sim::Trigger<E>> {
-      let mut batch = Vec::new();
+        let mut batch = Vec::new();
 
-      // Extract targeted cycle
-      let pop_at = if let Some(hpuc_sim::Trigger{at,..}) = self.triggers.peek() { 
-          *at
-      } else {// early return
-          return batch;
-      };
-
-    // Pop all subsequent Ord::Equal events
-    while let Some(next) = self.triggers.peek() {
-        if next.at.cmp(&pop_at) == std::cmp::Ordering::Equal {
-            batch.push(self.triggers.pop().unwrap());
+        // Extract targeted cycle
+        let pop_at = if let Some(hpuc_sim::Trigger { at, .. }) = self.triggers.peek() {
+            *at
         } else {
-            break;
-        }
-    }
+            // early return
+            return batch;
+        };
 
-    batch
+        // Pop all subsequent Ord::Equal events
+        while let Some(next) = self.triggers.peek() {
+            if next.at.cmp(&pop_at) == std::cmp::Ordering::Equal {
+                batch.push(self.triggers.pop().unwrap());
+            } else {
+                break;
+            }
+        }
+
+        batch
     }
 
     fn pop_delta(&mut self, delta: hpuc_sim::Cycle) -> Option<hpuc_sim::Trigger<E>> {
@@ -1129,7 +1223,9 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
             } else {
                 None
             }
-        } else {None}
+        } else {
+            None
+        }
     }
 }
 
@@ -1140,19 +1236,19 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .any(|hpuc_sim::Trigger{ at, event: e }| (e == event) && (at == filter_at))
+                .any(|hpuc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
                 .map(|trigger| &trigger.event)
                 .any(|e| e == event)
         }
-
     }
 
     fn dispatch(&mut self, event: Self::Event, delay: Option<hpuc_sim::Cycle>) {
         let ra2m_cycle = self.ra2m_clk_d.from_tick(cur_tick());
-        let dispatch_cycle = hpuc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hpuc_sim::Cycle::ZERO);
+        let dispatch_cycle =
+            hpuc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hpuc_sim::Cycle::ZERO);
 
         // NB: Discard event dispach in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
@@ -1162,110 +1258,241 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
             });
         }
     }
-
 }
-
 
 // Convert tfhe-rs::DOp in hpuc_sim::DOp
 // Required current hpu_core context for DOpId extraction
-fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp{
-    use hpuc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
+fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
     use hpu_sim::{DOp, DOpId, RawDOp};
+    use hpuc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
 
     let id = DOpId(pc);
     let raw = match asm_dop {
-        hpu_asm::DOp::ADD(inner) => RawDOp::ADD{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
-
-        },
-        hpu_asm::DOp::SUB(inner) => RawDOp::SUB{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
+        hpu_asm::DOp::ADD(inner) => RawDOp::ADD {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
             },
-        hpu_asm::DOp::MAC(inner) => RawDOp::MAC{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src1: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src0_rid.0 as usize},
-            src2: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src1_rid.0 as usize},
-            cst: Argument::PtConst{val: inner.0.mul_factor.0 as usize},
+            src1: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src0_rid.0 as usize,
+            },
+            src2: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src1_rid.0 as usize,
+            },
         },
-        hpu_asm::DOp::ADDS(inner) => RawDOp::ADDS{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
+        hpu_asm::DOp::SUB(inner) => RawDOp::SUB {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src1: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src0_rid.0 as usize,
+            },
+            src2: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src1_rid.0 as usize,
+            },
         },
-        hpu_asm::DOp::SUBS(inner) => RawDOp::SUBS{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
+        hpu_asm::DOp::MAC(inner) => RawDOp::MAC {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src1: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src0_rid.0 as usize,
+            },
+            src2: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src1_rid.0 as usize,
+            },
+            cst: Argument::PtConst {
+                val: inner.0.mul_factor.0 as usize,
+            },
         },
-        hpu_asm::DOp::SSUB(inner) => RawDOp::SSUB{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
+        hpu_asm::DOp::ADDS(inner) => RawDOp::ADDS {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            cst: Argument::PtConst {
+                val: inner.0.msg_cst.unwrap_cst() as usize,
+            },
         },
-        hpu_asm::DOp::MULS(inner) => RawDOp::MULS{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            cst: Argument::PtConst { val: inner.0.msg_cst.unwrap_cst() as usize},
+        hpu_asm::DOp::SUBS(inner) => RawDOp::SUBS {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            cst: Argument::PtConst {
+                val: inner.0.msg_cst.unwrap_cst() as usize,
+            },
         },
-        hpu_asm::DOp::LD(inner) => RawDOp::LD{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
-            src: Argument::CtIo{addr: inner.0.slot.unwrap_addr() as usize}
+        hpu_asm::DOp::SSUB(inner) => RawDOp::SSUB {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            cst: Argument::PtConst {
+                val: inner.0.msg_cst.unwrap_cst() as usize,
+            },
         },
-        hpu_asm::DOp::ST(inner) => RawDOp::ST{
-            dst: Argument::CtIo{addr: inner.0.slot.unwrap_addr() as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.rid.0 as usize},
+        hpu_asm::DOp::MULS(inner) => RawDOp::MULS {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            cst: Argument::PtConst {
+                val: inner.0.msg_cst.unwrap_cst() as usize,
+            },
+        },
+        hpu_asm::DOp::LD(inner) => RawDOp::LD {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.rid.0 as usize,
+            },
+            src: Argument::CtIo {
+                addr: inner.0.slot.unwrap_addr() as usize,
+            },
+        },
+        hpu_asm::DOp::ST(inner) => RawDOp::ST {
+            dst: Argument::CtIo {
+                addr: inner.0.slot.unwrap_addr() as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.rid.0 as usize,
+            },
         },
         hpu_asm::DOp::SYNC(_inner) => RawDOp::SYNC,
-        hpu_asm::DOp::PBS(inner) => RawDOp::PBS{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
-
+        hpu_asm::DOp::PBS(inner) => RawDOp::PBS {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_F(inner) => RawDOp::PBS_F{
-            dst: Argument::CtReg{mask: MASK_NONE, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_NONE, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_F(inner) => RawDOp::PBS_F {
+            dst: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_NONE,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML2(inner) => RawDOp::PBS_ML2{
-            dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML2(inner) => RawDOp::PBS_ML2 {
+            dst: Argument::CtReg {
+                mask: MASK_PBS2,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS2,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML2_F(inner) => RawDOp::PBS_ML2_F{
-            dst: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS2, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML2_F(inner) => RawDOp::PBS_ML2_F {
+            dst: Argument::CtReg {
+                mask: MASK_PBS2,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS2,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML4(inner) => RawDOp::PBS_ML4{
-            dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML4(inner) => RawDOp::PBS_ML4 {
+            dst: Argument::CtReg {
+                mask: MASK_PBS4,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS4,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML4_F(inner) => RawDOp::PBS_ML4_F{
-            dst: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS4, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML4_F(inner) => RawDOp::PBS_ML4_F {
+            dst: Argument::CtReg {
+                mask: MASK_PBS4,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS4,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML8(inner) => RawDOp::PBS_ML8{
-            dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML8(inner) => RawDOp::PBS_ML8 {
+            dst: Argument::CtReg {
+                mask: MASK_PBS8,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS8,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::PBS_ML8_F(inner) => RawDOp::PBS_ML8_F{
-            dst: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.dst_rid.0 as usize},
-            src: Argument::CtReg{mask: MASK_PBS8, addr: inner.0.src_rid.0 as usize},
-            lut: Argument::LutId {id: inner.0.gid.0 as usize,},
+        hpu_asm::DOp::PBS_ML8_F(inner) => RawDOp::PBS_ML8_F {
+            dst: Argument::CtReg {
+                mask: MASK_PBS8,
+                addr: inner.0.dst_rid.0 as usize,
+            },
+            src: Argument::CtReg {
+                mask: MASK_PBS8,
+                addr: inner.0.src_rid.0 as usize,
+            },
+            lut: Argument::LutId {
+                id: inner.0.gid.0 as usize,
+            },
         },
-        hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_)=> {
+        hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_) => {
             panic!("Error: DOp {asm_dop:?} must have been handled by Ucore")
         }
     };
-    DOp{ raw, id }
+    DOp { raw, id }
 }
 
 // Utilities function to handle filesystem
@@ -1285,5 +1512,3 @@ pub fn open_wr_file(file_path: &str) -> std::fs::File {
         .open(file_path)
         .unwrap()
 }
-
-

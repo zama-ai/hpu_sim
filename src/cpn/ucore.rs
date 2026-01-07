@@ -2,7 +2,12 @@
 //! I.e. kind of embedded processor that Handle IOp/DOp translation
 
 use ra2m::prelude::{
-    protocol::{addr::{Addr, Pattern}, dma::DmaBus, membus::MemBus, network::Network},
+    protocol::{
+        addr::{Addr, Pattern},
+        dma::DmaBus,
+        membus::MemBus,
+        network::Network,
+    },
     *,
 };
 use tfhe::tfhe_hpu_backend::prelude::*;
@@ -73,15 +78,21 @@ impl UCoreInner {
 /// Use for unique Ucore event identification
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum UcoreHash {
-    Ucore{iid: hpu_asm::IOpId, flag: hpu_asm::UcoreFlag},
-    User{iid: hpu_asm::IOpId, flag: hpu_asm::UserFlag},
+    Ucore {
+        iid: hpu_asm::IOpId,
+        flag: hpu_asm::UcoreFlag,
+    },
+    User {
+        iid: hpu_asm::IOpId,
+        flag: hpu_asm::UserFlag,
+    },
 }
 
 #[derive(Debug)]
 enum LdAction {
     Notify(hpu_asm::CtId),
     Read,
-    }
+}
 
 /// Keep track of Destination slot action
 /// Indeed, owner of the destination is responsible of retrieving value at the end of exection
@@ -101,9 +112,9 @@ struct B2bPool {
 
 impl B2bPool {
     fn new() -> Self {
-        Self{
+        Self {
             free: Vec::new(),
-        used_lifetime: HashMap::new(),
+            used_lifetime: HashMap::new(),
         }
     }
     fn add_slot(&mut self, slots: &[hpu_asm::CtId]) {
@@ -111,14 +122,16 @@ impl B2bPool {
     }
 
     fn get_tagged(&mut self, iid: hpu_asm::IOpId) -> hpu_asm::CtId {
-        let cid = self.free.pop().expect("B2bPool is empty, check you local variable usage");
+        let cid = self
+            .free
+            .pop()
+            .expect("B2bPool is empty, check you local variable usage");
         if let Some(vec) = self.used_lifetime.get_mut(&iid) {
             vec.push(cid);
-            } else {
-                self.used_lifetime.insert(iid, vec![cid]);
-            }
-            cid
-
+        } else {
+            self.used_lifetime.insert(iid, vec![cid]);
+        }
+        cid
     }
 
     fn release_tagged(&mut self, iid: hpu_asm::IOpId) {
@@ -184,7 +197,9 @@ impl UCore {
         // * user [used downward]
         // * b2b  [used downward]
         // * heap [used upward]
-        let b2b_slot =  (0..params.ct_b2b).map(|i| hpu_asm::CtId((params.ct_user + i) as u16)).collect::<Vec<_>>();
+        let b2b_slot = (0..params.ct_b2b)
+            .map(|i| hpu_asm::CtId((params.ct_user + i) as u16))
+            .collect::<Vec<_>>();
         inner.b2b_pool.add_slot(&b2b_slot);
 
         Self {
@@ -336,35 +351,57 @@ impl UCore {
                 // Generate execution report
                 self.dump_iop_report(&iop_pld);
 
-
                 let (hid, iop) = {
                     let mut inner = self.inner.lock().unwrap();
                     let hid = inner.config.node_id;
-                    let iop = inner.iop_pdg.pop_front().expect("Received IOp Ack without IOp pending");
-                    assert_eq!(iop.to_words(), iop_pld.inner.to_words(), "Mismatch between IOpPayload content and local store");
+                    let iop = inner
+                        .iop_pdg
+                        .pop_front()
+                        .expect("Received IOp Ack without IOp pending");
+                    assert_eq!(
+                        iop.to_words(),
+                        iop_pld.inner.to_words(),
+                        "Mismatch between IOpPayload content and local store"
+                    );
                     (hid, iop)
                 };
                 let iop_header_hex = iop.to_words()[0];
-                self.clone().flush_dst_ldq(iop.get_iid()).await
+                self.clone()
+                    .flush_dst_ldq(iop.get_iid())
+                    .await
                     .expect("Error while flush Dst Store queue");
 
                 // Notify Other HpuNode of dst availability
-                let notify_order = iop.dst().iter().filter(|op|  op.props.pos.0 == hid).flat_map(|op| {
-                           let vec_len = op.props.vec_size.len();
-                           let blk_len= op.props.block.len();
-                           itertools::iproduct!(0..vec_len, 0..blk_len).map(|(v,b)| v*blk_len + b).flat_map(|bid| {
-                                 let ucore_pld = hpu_asm::UcorePayload {
-                                    mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag{ pos: op.props.pos, slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16)}),
+                let notify_order = iop
+                    .dst()
+                    .iter()
+                    .filter(|op| op.props.pos.0 == hid)
+                    .flat_map(|op| {
+                        let vec_len = op.props.vec_size.len();
+                        let blk_len = op.props.block.len();
+                        itertools::iproduct!(0..vec_len, 0..blk_len)
+                            .map(|(v, b)| v * blk_len + b)
+                            .flat_map(|bid| {
+                                let ucore_pld = hpu_asm::UcorePayload {
+                                    mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
+                                        pos: op.props.pos,
+                                        slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16),
+                                    }),
                                     slot: None,
                                     from_hid: hpu_asm::NodeId(hid),
                                     iid: op.props.iid,
                                 };
 
-                                self.params.cluster_nodes.iter().filter(|n| **n != hid).map(|n| {
-                                    Network::new_wrapped(hid, *n, ucore_pld, None)
-                                }).collect::<Vec<_>>()
-                       }).collect::<Vec<_>>()
-                }).collect::<Vec<_>>();
+                                self.params
+                                    .cluster_nodes
+                                    .iter()
+                                    .filter(|n| **n != hid)
+                                    .map(|n| Network::new_wrapped(hid, *n, ucore_pld, None))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
 
                 self.ctrl
                     .tx()
@@ -372,8 +409,12 @@ impl UCore {
                     .await
                     .expect("Error while notifying cluster");
 
-                 // Release b2b_pool slot that belong to current iop
-                 self.inner.lock().unwrap().b2b_pool.release_tagged(iop.get_iid());
+                // Release b2b_pool slot that belong to current iop
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .b2b_pool
+                    .release_tagged(iop.get_iid());
 
                 // write body
                 self.mem
@@ -403,42 +444,44 @@ impl UCore {
             if let Some(iop) = iop_pdg {
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
+                {
+                    // Mutex scope
+                    let mut inner = self.inner.lock().unwrap();
 
-                {  // Mutex scope
-                   let mut inner = self.inner.lock().unwrap();
+                    // Check for user side restart
+                    // I.e. start of a new application that reset the allocator state
+                    if inner.cur_iid >= iop.get_iid() {
+                        // Flush internal state
+                        inner.b2b_pool.release_all();
+                        inner.event_list.clear();
+                    }
+                    // Populate DstLdQueue
+                    // Add entry for each sub-slot owned by local node
+                    // DstLdQueue will be flush between:
+                    //  * Sync received from hpu_core
+                    //  *  Forward to host
+                    for operand in iop.dst().iter() {
+                        if operand.props.pos.0 == inner.config.node_id {
+                            let vec_len = operand.props.vec_size.len();
+                            let blk_len = operand.props.block.len();
 
-                   // Check for user side restart
-                   // I.e. start of a new application that reset the allocator state
-                   if inner.cur_iid >= iop.get_iid() {
-                       // Flush internal state
-                       inner.b2b_pool.release_all();
-                       inner.event_list.clear();
-                   }
-                   // Populate DstLdQueue
-                   // Add entry for each sub-slot owned by local node
-                   // DstLdQueue will be flush between: 
-                   //  * Sync received from hpu_core
-                   //  *  Forward to host
-                   for operand in iop.dst().iter() {
-                       if operand.props.pos.0 == inner.config.node_id {
-                           let vec_len = operand.props.vec_size.len();
-                           let blk_len= operand.props.block.len();
-
-                           for bid in itertools::iproduct!(0..vec_len, 0..blk_len).map(|(v,b)| v*blk_len + b) {
-                               let order = DstLdOrder{
-                                iid: iop.get_iid(),
-                                operand: *operand,
-                                cid: hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16),
-                                action: LdAction::Read,
+                            for bid in itertools::iproduct!(0..vec_len, 0..blk_len)
+                                .map(|(v, b)| v * blk_len + b)
+                            {
+                                let order = DstLdOrder {
+                                    iid: iop.get_iid(),
+                                    operand: *operand,
+                                    cid: hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16),
+                                    action: LdAction::Read,
                                 };
-                               inner.dst_ldq.push(order);
-                       }
-                   }
-                   }
+                                inner.dst_ldq.push(order);
+                            }
+                        }
+                    }
 
-                   inner.cur_iid = iop.get_iid();
-                   inner.iop_pdg.push_back(iop.clone());
-                   event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
+                    inner.cur_iid = iop.get_iid();
+                    inner.iop_pdg.push_back(iop.clone());
+                    event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
                 }
 
                 // Update context in HpuCore
@@ -448,9 +491,10 @@ impl UCore {
                     pld.wrap_up(*self.props.uid());
                     Packet::wrap_payload(pld, Default::default())
                 };
-                self.hpu_ctx.send_pkt(iop_pkt).await
+                self.hpu_ctx
+                    .send_pkt(iop_pkt)
+                    .await
                     .expect("Issue with ucore iop context update");
-                
 
                 // Retrived DOp stream from memory
                 let dops = self.load_fw(&iop).await;
@@ -477,13 +521,13 @@ impl UCore {
                 .inner_unwrap()
                 .unwrap_payload();
 
-        // Stall event handling while there is no iop_pending
-        // Aims is to correctly detect user reset (i.e. start of new application)
-        // and prevent clash with event_list
-        let iop_empty= self.inner.lock().unwrap().iop_pdg.is_empty();
-        if iop_empty {
-            event::Event::wait(&forge_event_name!(|self| "NoIOpPending")).await;
-        }
+            // Stall event handling while there is no iop_pending
+            // Aims is to correctly detect user reset (i.e. start of new application)
+            // and prevent clash with event_list
+            let iop_empty = self.inner.lock().unwrap().iop_pdg.is_empty();
+            if iop_empty {
+                event::Event::wait(&forge_event_name!(|self| "NoIOpPending")).await;
+            }
 
             self.insert_event(ucore_pld);
         }
@@ -516,32 +560,38 @@ impl UCore {
 
     /// Utility function to convert CtId in real Addr
     fn cid_to_addr(&self, cid: hpu_asm::CtId) -> Vec<Addr> {
-        let ct_chunk_size_b = 
-            page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
-                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
-                    * std::mem::size_of::<u64>());
+        let ct_chunk_size_b = page_align(
+            hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
+                .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                * std::mem::size_of::<u64>(),
+        );
         // Ct_ofst is equal over PC
-        let ct_ofst = cid.0 as usize
-            * ct_chunk_size_b;
+        let ct_ofst = cid.0 as usize * ct_chunk_size_b;
 
-        self.params.ct_pc.iter().map(|mem_kind| 
-            // WARN: this only work if ct_mem is allocated at begin of each channel
-            // TODO read offset from regmap register
-            
-            Addr::Phys(match mem_kind {
-                MemKind::Ddr { offset } => offset + ct_ofst,
-                MemKind::Hbm { pc } => self.params.hbm_global_ofst + pc* self.params.hbm_pc_ofst + ct_ofst,
-            })).collect::<Vec<_>>()
+        self.params
+            .ct_pc
+            .iter()
+            .map(|mem_kind| {
+                // WARN: this only work if ct_mem is allocated at begin of each channel
+                // TODO read offset from regmap register
+
+                Addr::Phys(match mem_kind {
+                    MemKind::Ddr { offset } => offset + ct_ofst,
+                    MemKind::Hbm { pc } => {
+                        self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst + ct_ofst
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
     }
 
     /// Utility function to get hpu ciphertext pattern for one Pc
     fn ct_pc_pattern(&self) -> Pattern {
-        let ct_chunk_size_b = 
-            page_align(
-                hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
-                    .div_ceil(self.params.rtl_params.pc_params.pem_pc)
-                    * std::mem::size_of::<u64>());
+        let ct_chunk_size_b = page_align(
+            hpu_big_lwe_ciphertext_size(&self.params.rtl_params)
+                .div_ceil(self.params.rtl_params.pc_params.pem_pc)
+                * std::mem::size_of::<u64>(),
+        );
 
         Pattern::Simple(ct_chunk_size_b.Byte())
     }
@@ -554,21 +604,20 @@ impl UCore {
                 panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
             }
         };
-        let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD*std::mem::size_of::<u32>();
-
+        let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>();
 
         // Read config from runtime config area
         // Update inner config and extract hid
-        let hid ={
+        let hid = {
             let fw_cfg_raw = self
-            .mem
-            .read_bytes(
-                self.properties(),
-                fw_base_addr,
-                std::mem::size_of::<UcoreConfig>(),
-            )
-            .await
-            .expect("Error while reading fw config");
+                .mem
+                .read_bytes(
+                    self.properties(),
+                    fw_base_addr,
+                    std::mem::size_of::<UcoreConfig>(),
+                )
+                .await
+                .expect("Error while reading fw config");
 
             let fw_cfg = *bytemuck::from_bytes(fw_cfg_raw.as_slice());
 
@@ -593,11 +642,7 @@ impl UCore {
         let dop_len = {
             let mut val = 0_u32;
             self.mem
-                .read(
-                    self.properties(),
-                    fw_lut_addr + dop_ofst as usize,
-                    &mut val,
-                )
+                .read(self.properties(), fw_lut_addr + dop_ofst as usize, &mut val)
                 .await
                 .expect("Error while reading fw");
             Self::words_to_bytes::<u32>(val as usize)
@@ -636,20 +681,22 @@ impl UCore {
                     let raw_cid = match inner.slot {
                         hpu_asm::MemId::Addr(ct_id) => ct_id,
                         hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
-                                        (self.params.ct_user
-                                            + self.params.ct_b2b
-                                            + self.params.ct_heap
-                                            - 1) as u16
-                                            - bid,
-                                    ),
+                            (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
+                                as u16
+                                - bid,
+                        ),
 
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
                     let from_hid = hpu_asm::NodeId(self.inner.lock().unwrap().config.node_id);
                     let to_hid = inner.hid;
 
-                    let ucore_pld = hpu_asm::UcorePayload{ mode: hpu_asm::UcorePayloadMode::User(inner.flag), slot: Some(raw_cid), from_hid, iid: iop.get_iid()};
-
+                    let ucore_pld = hpu_asm::UcorePayload {
+                        mode: hpu_asm::UcorePayloadMode::User(inner.flag),
+                        slot: Some(raw_cid),
+                        from_hid,
+                        iid: iop.get_iid(),
+                    };
 
                     log!(|self| log::Category::Own, log::Verbosity::Trace => ucore_pld => "Issue B2b Notify");
                     self.ctrl
@@ -660,26 +707,29 @@ impl UCore {
                     None
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(inner)) => {
-                    let hash = UcoreHash::User{iid: iop.get_iid(), flag: inner.flag};
+                    let hash = UcoreHash::User {
+                        iid: iop.get_iid(),
+                        flag: inner.flag,
+                    };
                     self.wait(&hash).await;
                     None
                 }
                 hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(inner)) => {
-
                     //1. Construct hash
                     let raw_cid = match inner.slot {
                         hpu_asm::MemId::Addr(ct_id) => ct_id,
                         hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
-                                        (self.params.ct_user
-                                            + self.params.ct_b2b
-                                            + self.params.ct_heap
-                                            - 1) as u16
-                                            - bid,
-                                    ),
+                            (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
+                                as u16
+                                - bid,
+                        ),
 
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
-                    let hash = UcoreHash::User{iid: iop.get_iid(), flag: inner.flag};
+                    let hash = UcoreHash::User {
+                        iid: iop.get_iid(),
+                        flag: inner.flag,
+                    };
 
                     //2. Register background worker
                     // This worker will wait on associated event and triggered the dma acess
@@ -710,15 +760,22 @@ impl UCore {
                                 }
                                 hpu_asm::MemId::Src { tid, bid } => {
                                     let operand = iop.src()[tid as usize];
-                                    let op_cid =hpu_asm::CtId(
-                                            operand.addr.base_cid.0 + bid as u16,
-                                        ); 
-                                    if operand.props.pos.0 == self.inner.lock().unwrap().config.node_id {
+                                    let op_cid =
+                                        hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
+                                    if operand.props.pos.0
+                                        == self.inner.lock().unwrap().config.node_id
+                                    {
                                         // Local access -> Usual patching
                                         hpu_asm::MemId::Addr(op_cid)
                                     } else {
                                         // Remote access
-                                        let hash = UcoreHash::Ucore{iid: operand.props.iid, flag: hpu_asm::UcoreFlag{pos: operand.props.pos, slot: op_cid}};
+                                        let hash = UcoreHash::Ucore {
+                                            iid: operand.props.iid,
+                                            flag: hpu_asm::UcoreFlag {
+                                                pos: operand.props.pos,
+                                                slot: op_cid,
+                                            },
+                                        };
                                         self.clone()
                                             .ld_b2b_bg(iop.get_iid(), hash, None)
                                             .await
@@ -728,17 +785,25 @@ impl UCore {
                                 hpu_asm::MemId::Dst { tid, bid } => {
                                     let mut inner = self.inner.lock().unwrap();
                                     let operand = iop.dst()[tid as usize];
-                                    let cid = hpu_asm::CtId(
-                                        operand.addr.base_cid.0 + bid as u16);
+                                    let cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
 
                                     let op_cid = if operand.props.pos.0 == inner.config.node_id {
                                         // Local access -> Usual patching
                                         // Also removed associated DstLdOrder in the queue
-                                        if let Some(i) = inner.dst_ldq.iter().enumerate().filter(|(_i, x)| {
-                                            x.iid == inner.cur_iid
-                                            && x.operand == operand
-                                            && x.cid == cid
-                                            }).map(|(i,_x)| i).next() {let _ = inner.dst_ldq.remove(i);};
+                                        if let Some(i) = inner
+                                            .dst_ldq
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_i, x)| {
+                                                x.iid == inner.cur_iid
+                                                    && x.operand == operand
+                                                    && x.cid == cid
+                                            })
+                                            .map(|(i, _x)| i)
+                                            .next()
+                                        {
+                                            let _ = inner.dst_ldq.remove(i);
+                                        };
                                         cid
                                     } else {
                                         // Remote access
@@ -747,18 +812,23 @@ impl UCore {
 
                                         // Create associated DstLdOrder in the queue if it doesn't exist
                                         match inner.dst_ldq.iter().enumerate().find(|(_i, x)| {
-                                        x.iid == inner.cur_iid
-                                        && x.operand == operand
-                                        && x.cid == cid
-                                            }) {
-                                                Some(_) => {},
-                                                None => {
-                                                    // Create associated entry.
-                                                    // NB: only occured for remote access case (i.e. no direct deletion afterward)
-                                                    let order = DstLdOrder{ iid: inner.cur_iid, operand, cid, action: LdAction::Notify(tmp_cid)};
-                                                    inner.dst_ldq.push(order)
-                                                },
-                                            };
+                                            x.iid == inner.cur_iid
+                                                && x.operand == operand
+                                                && x.cid == cid
+                                        }) {
+                                            Some(_) => {}
+                                            None => {
+                                                // Create associated entry.
+                                                // NB: only occured for remote access case (i.e. no direct deletion afterward)
+                                                let order = DstLdOrder {
+                                                    iid: inner.cur_iid,
+                                                    operand,
+                                                    cid,
+                                                    action: LdAction::Notify(tmp_cid),
+                                                };
+                                                inner.dst_ldq.push(order)
+                                            }
+                                        };
                                         tmp_cid
                                     };
 
@@ -787,12 +857,15 @@ impl UCore {
                 let dop_pkt = Packet::wrap_payload(DOpPayload::new(dop), Default::default());
                 self.hpu_req.send_pkt(dop_pkt).await?;
                 // TODO refine this maybe use a more accurate timing model inside the ucore
-                delay::Delay::wait_for((unit::Time::from(self.props.clock_domain().frequency())*2.0).into()).await;
+                delay::Delay::wait_for(
+                    (unit::Time::from(self.props.clock_domain().frequency()) * 2.0).into(),
+                )
+                .await;
             }
         }
 
         // Ucore is in charge of Sync insertion
-        let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid(),).into();
+        let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid()).into();
         let sync_dop_pkt = Packet::wrap_payload(DOpPayload::new(sync_dop), Default::default());
         self.hpu_req.send_pkt(sync_dop_pkt).await?;
         log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translate and deferred to Hpu");
@@ -826,7 +899,7 @@ impl UCore {
         dst: Option<hpu_asm::CtId>,
     ) -> Result<hpu_asm::MemId, anyhow::Error> {
         loop {
-            let  (hid, event) = {
+            let (hid, event) = {
                 let inner = self.inner.lock().unwrap();
                 (inner.config.node_id, inner.event_list.get(&hash).cloned())
             };
@@ -844,16 +917,20 @@ impl UCore {
                         Some(cid) => cid,
                         None => self.inner.lock().unwrap().b2b_pool.get_tagged(iid),
                     };
-                    let src_addr = self.cid_to_addr(payload.slot.expect("LD_B2B required slot information"));
+                    let src_addr =
+                        self.cid_to_addr(payload.slot.expect("LD_B2B required slot information"));
                     let dst_addr = self.cid_to_addr(dst_cid);
 
-                    let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter()).map(|(src,dst)| 
+                    let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter())
+                        .map(|(src, dst)| {
                             DmaBus::new_wrapped(
                                 (payload.from_hid.0, src),
                                 (hid, dst),
                                 self.ct_pc_pattern(),
                                 None,
-                            )).collect::<Vec<_>>();
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     log!(|self| log::Category::Own, log::Verbosity::Debug => dma_req => "Build Dma requests");
 
                     // Only check for error
@@ -869,15 +946,21 @@ impl UCore {
                     *event = Event::Resolved(hpu_asm::MemId::Addr(dst_cid));
                 }
                 None => {
-                        if let UcoreHash::Ucore{ iid, flag} = hash
-                            && iid == hpu_asm::SW_IOP_ID {
-                            // Value generated by Sw and already uploaded in memory
-                            // Automatically register its associated event
-                            let ucore_pld = hpu_asm::UcorePayload { mode: hpu_asm::UcorePayloadMode::Ucore(flag), slot: Some(flag.slot), from_hid: flag.pos, iid};
-                            self.insert_event(ucore_pld);
-                            }
+                    if let UcoreHash::Ucore { iid, flag } = hash
+                        && iid == hpu_asm::SW_IOP_ID
+                    {
+                        // Value generated by Sw and already uploaded in memory
+                        // Automatically register its associated event
+                        let ucore_pld = hpu_asm::UcorePayload {
+                            mode: hpu_asm::UcorePayloadMode::Ucore(flag),
+                            slot: Some(flag.slot),
+                            from_hid: flag.pos,
+                            iid,
+                        };
+                        self.insert_event(ucore_pld);
+                    }
 
-                        self.wait(&hash).await
+                    self.wait(&hash).await
                 }
             }
         }
@@ -894,8 +977,8 @@ impl UCore {
                 .dst_ldq
                 .iter_mut()
                 .partition_in_place(|e| e.iid != for_iid);
-             (inner.config.node_id, inner.dst_ldq.split_off(remains_elem))
-         };
+            (inner.config.node_id, inner.dst_ldq.split_off(remains_elem))
+        };
 
         // 2. Execute DstLdOrder
         let (notify_ord, read_ord) = {
@@ -904,40 +987,47 @@ impl UCore {
                 LdAction::Read => true,
             });
             (cur_ord.split_off(rd_elem), cur_ord)
-            };
+        };
 
         // 2.a Execute Notify
-        let notify_order = notify_ord.iter().map(|order| {
-            let slot = match order.action{
-                LdAction::Notify(ct_id) => ct_id,
-                LdAction::Read => panic!("Check cur_ord filtering"),
-            };
-             let ucore_pld = hpu_asm::UcorePayload {
-                mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag{ pos: order.operand.props.pos, slot: order.cid}),
-                slot: Some(slot),
-                from_hid: hpu_asm::NodeId(hid),
-                iid: order.iid,
-            };
+        let notify_order = notify_ord
+            .iter()
+            .map(|order| {
+                let slot = match order.action {
+                    LdAction::Notify(ct_id) => ct_id,
+                    LdAction::Read => panic!("Check cur_ord filtering"),
+                };
+                let ucore_pld = hpu_asm::UcorePayload {
+                    mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
+                        pos: order.operand.props.pos,
+                        slot: order.cid,
+                    }),
+                    slot: Some(slot),
+                    from_hid: hpu_asm::NodeId(hid),
+                    iid: order.iid,
+                };
 
-            // Notify owner HpuNode 
-            Network::new_wrapped(hid, order.operand.props.pos.0, ucore_pld, None)
-        })
+                // Notify owner HpuNode
+                Network::new_wrapped(hid, order.operand.props.pos.0, ucore_pld, None)
+            })
             .collect::<Vec<_>>();
 
-        self.ctrl
-            .tx()
-            .send_pkt_burst(notify_order)
-            .await?;
+        self.ctrl.tx().send_pkt_burst(notify_order).await?;
 
         // 2.b Execute Remote load
         // Also notify other Node of data availability
         for order in read_ord.iter() {
-            let hash = UcoreHash::Ucore{iid: order.iid, flag: hpu_asm::UcoreFlag{pos: order.operand.props.pos, slot: order.cid}};
+            let hash = UcoreHash::Ucore {
+                iid: order.iid,
+                flag: hpu_asm::UcoreFlag {
+                    pos: order.operand.props.pos,
+                    slot: order.cid,
+                },
+            };
             self.clone()
                 .ld_b2b_bg(order.iid, hash, Some(order.cid))
                 .await
                 .expect("Issue with ld_b2b background task");
-
         }
         Ok(())
     }
@@ -946,15 +1036,18 @@ impl UCore {
     fn insert_event(&self, ucore_pld: hpu_asm::UcorePayload) {
         // Compute hash
         let hash = match &ucore_pld.mode {
-            hpu_asm::UcorePayloadMode::Ucore(ucore_flag) =>  UcoreHash::Ucore{iid: ucore_pld.iid, flag: *ucore_flag},
-            hpu_asm::UcorePayloadMode::User(user_flag) =>
-                    UcoreHash::User{iid: ucore_pld.iid, flag: *user_flag},
+            hpu_asm::UcorePayloadMode::Ucore(ucore_flag) => UcoreHash::Ucore {
+                iid: ucore_pld.iid,
+                flag: *ucore_flag,
+            },
+            hpu_asm::UcorePayloadMode::User(user_flag) => UcoreHash::User {
+                iid: ucore_pld.iid,
+                flag: *user_flag,
+            },
         };
         // Update inner state table
         let mut inner = self.inner.lock().unwrap();
-        let present = inner
-            .event_list
-            .insert(hash, Event::Received(ucore_pld));
+        let present = inner.event_list.insert(hash, Event::Received(ucore_pld));
         if let Some(event) = present {
             panic!(
                 "Ucore {}: Received duplicated event @{hash:?} => {event:?}",
@@ -969,28 +1062,40 @@ impl UCore {
 impl UCore {
     fn dump_iop_report(&self, pld: &IOpPayload) {
         // Display in console for user real-time inspection
-        println!("Executed IOp: {} in {} [{} timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len()); 
+        println!(
+            "Executed IOp: {} in {} [{} timeout]",
+            pld.inner.asm_opcode(),
+            pld.get_history().duration(),
+            pld.batch_timeout.len()
+        );
         println!("{pld}");
 
         // Append in execution log for later analyses
         {
-        let trace_folder = Output::get_trace_folder();
-        let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
-        let rpt_f = format!("{}/executed_iop.rpt", trace_path.to_str().unwrap());
+            let trace_folder = Output::get_trace_folder();
+            let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
+            let rpt_f = format!("{}/executed_iop.rpt", trace_path.to_str().unwrap());
 
-        let rpt_p= std::path::Path::new(&rpt_f);
-        if let Some(dir_p) = rpt_p.parent() {
-            std::fs::create_dir_all(dir_p).unwrap();
-        }
+            let rpt_p = std::path::Path::new(&rpt_f);
+            if let Some(dir_p) = rpt_p.parent() {
+                std::fs::create_dir_all(dir_p).unwrap();
+            }
 
-        // Open file
-        let mut wr_f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(true)
-            .open(rpt_p).expect("Error: Unable to open rpt file in append mode");
-        writeln!(wr_f, "{}::{} [{} timeout]", pld.inner.asm_opcode(), pld.get_history().duration(), pld.batch_timeout.len())
-        .expect("Error: Unable to append to rpt file");
+            // Open file
+            let mut wr_f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(rpt_p)
+                .expect("Error: Unable to open rpt file in append mode");
+            writeln!(
+                wr_f,
+                "{}::{} [{} timeout]",
+                pld.inner.asm_opcode(),
+                pld.get_history().duration(),
+                pld.batch_timeout.len()
+            )
+            .expect("Error: Unable to append to rpt file");
         }
 
         // Dump dop execution order for debug
@@ -1000,8 +1105,14 @@ impl UCore {
         // Generate executed DOp order
         let iopcode = pld.inner.opcode().0;
 
-        let asm_p = format!("{}/dop/dop_executed_{iopcode:0>2x}.asm", trace_path.to_str().unwrap());
-        let hex_p = format!("{}/dop/dop_executed_{iopcode:0>2x}.hex",trace_path.to_str().unwrap());
+        let asm_p = format!(
+            "{}/dop/dop_executed_{iopcode:0>2x}.asm",
+            trace_path.to_str().unwrap()
+        );
+        let hex_p = format!(
+            "{}/dop/dop_executed_{iopcode:0>2x}.hex",
+            trace_path.to_str().unwrap()
+        );
         let dop_prog = hpu_asm::Program::new(
             pld.exec_order
                 .iter()
