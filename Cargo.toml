@@ -25,13 +25,14 @@ debug-assertions = false
 
 [dependencies]
 # Swap them if want to rely on local version of ra2m
-# ra2m = {git = "ssh://git@github.com/zama-ai/ra2m.git", branch="hpu_sim", features = [], optional = true}
-ra2m = {path="../ra2m", features = []}
+# ra2m = {path="../ra2m", features = []}
+ra2m = {version = "0.1.0", features = []}
 tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
+# tfhe = { version = "1.4", features = ["hpu", "hpu-debug"] }
 hpuc_sim = { path = "../hpu_compiler/hpuc_sim"}
 hpuc_langs = { path = "../hpu_compiler/hpuc_langs"}
 clap = { version = "=4.5.30", features = ["derive"] }
-bytemuck = "1.23.2"
+bytemuck = "1.24"
 serde = { version = "1", features = ["derive"] }
 itertools = "0.14.0"
 bitfield-struct = "0.12.1"
