@@ -34,7 +34,7 @@ pub struct IOpPayload {
     asm_view: String,
 
     /// Timeout logging
-    batch_timeout: Vec<hpuc_sim::hpu::DOpId>,
+    batch_timeout: Vec<hc_sim::hpu::DOpId>,
     exec_order: Vec<hpu_asm::DOp>,
 
     /// Contain history of the handling information of a given access through its route across the

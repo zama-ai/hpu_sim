@@ -462,15 +462,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
-name = "containers"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1025,6 +1016,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
+name = "hc_ir"
+version = "0.1.0"
+dependencies = [
+ "hc_utils",
+ "hc_utils_macro",
+]
+
+[[package]]
+name = "hc_langs"
+version = "0.1.0"
+dependencies = [
+ "hc_ir",
+ "hc_utils",
+ "serde",
+]
+
+[[package]]
+name = "hc_sim"
+version = "0.1.0"
+dependencies = [
+ "hc_langs",
+ "hc_utils",
+ "serde",
+ "serde_json",
+ "toml 0.9.10+spec-1.1.0",
+]
+
+[[package]]
+name = "hc_utils"
+version = "0.1.0"
+dependencies = [
+ "hc_utils_macro",
+ "paste",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hc_utils_macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.112",
+]
+
+[[package]]
 name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1052,48 +1090,13 @@ dependencies = [
  "bitfield-struct 0.12.1",
  "bytemuck",
  "clap",
- "hpuc_langs",
- "hpuc_sim",
+ "hc_langs",
+ "hc_sim",
  "itertools 0.14.0",
  "ra2m",
  "serde",
  "tfhe",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "hpuc_ir"
-version = "0.1.0"
-dependencies = [
- "hpuc_utils",
-]
-
-[[package]]
-name = "hpuc_langs"
-version = "0.1.0"
-dependencies = [
- "hpuc_ir",
- "hpuc_utils",
- "serde",
-]
-
-[[package]]
-name = "hpuc_sim"
-version = "0.1.0"
-dependencies = [
- "hpuc_langs",
- "hpuc_utils",
- "serde",
- "serde_json",
- "toml 0.9.10+spec-1.1.0",
-]
-
-[[package]]
-name = "hpuc_utils"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1273,15 +1276,6 @@ dependencies = [
 [[package]]
 name = "ipc"
 version = "0.1.0"
-dependencies = [
- "ipc-channel",
- "serde",
- "thiserror 2.0.17",
-]
-
-[[package]]
-name = "ipc"
-version = "0.1.0"
 source = "git+ssh://git@github.com/zama-ai/ra2m.git?branch=hpu_sim#06c4ba94bfb9a4913b16cc24d750ad3d4edcb1fe"
 dependencies = [
  "ipc-channel",
@@ -1367,30 +1361,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kernel"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytemuck",
- "containers",
- "crossbeam",
- "ctrlc",
- "futures",
- "getset",
- "macros",
- "num",
- "once_cell",
- "output",
- "rand",
- "regex",
- "serde",
- "serial_test",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1451,15 +1421,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
 dependencies = [
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "macros"
-version = "0.5.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.112",
 ]
 
 [[package]]
@@ -1659,23 +1620,6 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
-
-[[package]]
-name = "output"
-version = "0.5.0"
-dependencies = [
- "bincode",
- "chrono",
- "getset",
- "once_cell",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "serial_test",
- "strum 0.24.1",
- "strum_macros 0.24.3",
-]
 
 [[package]]
 name = "parking_lot"
@@ -2022,20 +1966,24 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "ra2m"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4eb2be70b56ec4aa00d7ab0806f5f54604031c2ca9e49efd381c28b0524773d"
 dependencies = [
  "ra2m_cpn",
- "ra2m_ffi 0.5.0",
+ "ra2m_ffi 0.1.0",
  "ra2m_sim",
 ]
 
 [[package]]
 name = "ra2m_cpn"
-version = "0.5.0"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e468562f3e23ade278e5b6f345c9431c3a94131f2521fd8e0d8820106b3de365"
 dependencies = [
  "crossbeam",
  "getset",
  "once_cell",
- "ra2m_ffi 0.5.0",
+ "ra2m_ffi 0.1.0",
  "ra2m_sim",
  "rand",
  "serde",
@@ -2044,10 +1992,11 @@ dependencies = [
 
 [[package]]
 name = "ra2m_ffi"
-version = "0.5.0"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c21ec2f10e2db58de9d56c7656504b7dc31516ee3bbb994467125d52a1d157c"
 dependencies = [
- "ipc 0.1.0",
- "rpc 0.1.0",
+ "ra2m_ffi_ipc",
 ]
 
 [[package]]
@@ -2055,18 +2004,98 @@ name = "ra2m_ffi"
 version = "0.5.0"
 source = "git+ssh://git@github.com/zama-ai/ra2m.git?branch=hpu_sim#06c4ba94bfb9a4913b16cc24d750ad3d4edcb1fe"
 dependencies = [
- "ipc 0.1.0 (git+ssh://git@github.com/zama-ai/ra2m.git?branch=hpu_sim)",
- "rpc 0.1.0 (git+ssh://git@github.com/zama-ai/ra2m.git?branch=hpu_sim)",
+ "ipc",
+ "rpc",
+]
+
+[[package]]
+name = "ra2m_ffi_ipc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82bea299c4d9877a811cf6e7cdc294e4ef82995f2846393e39eaf1dc964f6040"
+dependencies = [
+ "ipc-channel",
+ "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
 name = "ra2m_sim"
-version = "0.5.0"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4987267bb5d41a9cf15ec677c00f2d768d89c26a4480b17a4a84d9d3f6b62727"
 dependencies = [
- "containers",
- "kernel",
- "macros",
- "output",
+ "ra2m_sim_containers",
+ "ra2m_sim_kernel",
+ "ra2m_sim_macros",
+ "ra2m_sim_output",
+]
+
+[[package]]
+name = "ra2m_sim_containers"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "073142c7986cc45a34e631e7609cc067adb65dc6d2f38f66d4b3fc64007d90dd"
+dependencies = [
+ "anyhow",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "ra2m_sim_kernel"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0f0ea71f040447106109627121882e524b86c78448ad79f22098fd166332db8"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytemuck",
+ "crossbeam",
+ "ctrlc",
+ "futures",
+ "getset",
+ "num",
+ "once_cell",
+ "ra2m_sim_containers",
+ "ra2m_sim_macros",
+ "ra2m_sim_output",
+ "rand",
+ "regex",
+ "serde",
+ "serial_test",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "ra2m_sim_macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d3eec2e7cef2d812e4fbb557080c9327801e82069455c3fd26545c42d78b457"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.112",
+]
+
+[[package]]
+name = "ra2m_sim_output"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4728891046d59b85bf610ac239d8da9629287af66e17b2c2e05e75d0b4f1cfd0"
+dependencies = [
+ "bincode",
+ "chrono",
+ "getset",
+ "once_cell",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "strum 0.24.1",
+ "strum_macros 0.24.3",
 ]
 
 [[package]]
@@ -2177,18 +2206,6 @@ name = "regex-syntax"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
-
-[[package]]
-name = "rpc"
-version = "0.1.0"
-dependencies = [
- "memoffset",
- "prost",
- "tokio-stream",
- "tonic",
- "tonic-build",
- "tower",
-]
 
 [[package]]
 name = "rpc"
@@ -2656,7 +2673,7 @@ dependencies = [
  "nix 0.29.0",
  "num-traits",
  "paste",
- "ra2m_ffi 0.5.0 (git+ssh://git@github.com/zama-ai/ra2m.git?branch=hpu_sim)",
+ "ra2m_ffi 0.5.0",
  "rand",
  "rayon",
  "regex",

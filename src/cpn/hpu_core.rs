@@ -1,9 +1,9 @@
 //! Depict Hpu computation core
 
+use hc_langs;
+use hc_sim::hpu as hpu_sim;
+use hc_sim::{Dispatch, Simulatable, Tracer};
 pub use hpu_sim::IscCommand;
-use hpuc_langs;
-use hpuc_sim::hpu as hpu_sim;
-use hpuc_sim::{Dispatch, Simulatable, Tracer};
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
 use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
@@ -25,7 +25,7 @@ pub struct HpuCoreParams {
     pub compute_params: HpuParameters,
     // Performance config for simulation model
     pub sim_config: hpu_sim::HpuConfig,
-    // Enable hpuc_sim tracing feature
+    // Enable hc_sim tracing feature
     pub sim_trace: bool,
 
     /// Do trivial computation
@@ -181,7 +181,7 @@ impl HpuCore {
             let trace_path = trace_folder.join(std::path::Path::new(&filename));
             let inner = self.inner.lock().unwrap();
             inner.sim_tracer.dump(
-                hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 trace_path,
             );
         }
@@ -234,7 +234,7 @@ impl HpuCore {
             } = *inner;
             sim_model.power_up(sim_event);
             sim_model.report(
-                hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 sim_tracer,
             );
         }
@@ -273,10 +273,10 @@ impl HpuCore {
 
                     // Apply all trigger to sim_model
                     for trigger in batch_trigger.iter() {
-                        // Populate hpuc simulation trace
+                        // Populate hpu ccompiler simulation trace
                         if self.params.sim_trace {
                             sim_tracer.add_event(
-                                hpuc_sim::Cycle(
+                                hc_sim::Cycle(
                                     self.props.clock_domain().from_tick(cur_tick()).into(),
                                 ),
                                 &trigger.event,
@@ -739,7 +739,7 @@ impl HpuCore {
                     ..
                 } = *inner;
                 sim_model.report(
-                    hpuc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                    hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                     sim_tracer,
                 );
             }
@@ -1177,14 +1177,14 @@ impl HpuCore {
     }
 }
 
-// A set of structure used to bridge hpuc_sim simulation model within Ra2m
+// A set of structure used to bridge hc_sim simulation model within Ra2m
 // simulation kernel
-struct HpuEventStore<E: hpuc_sim::Event> {
+struct HpuEventStore<E: hc_sim::Event> {
     ra2m_clk_d: ClockDomain,
-    triggers: BinaryHeap<hpuc_sim::Trigger<E>>,
+    triggers: BinaryHeap<hc_sim::Trigger<E>>,
 }
 
-impl<E: hpuc_sim::Event> HpuEventStore<E> {
+impl<E: hc_sim::Event> HpuEventStore<E> {
     fn new(ra2m_clk_d: ClockDomain) -> Self {
         Self {
             ra2m_clk_d,
@@ -1192,11 +1192,11 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
         }
     }
 
-    fn pop_batch(&mut self) -> Vec<hpuc_sim::Trigger<E>> {
+    fn pop_batch(&mut self) -> Vec<hc_sim::Trigger<E>> {
         let mut batch = Vec::new();
 
         // Extract targeted cycle
-        let pop_at = if let Some(hpuc_sim::Trigger { at, .. }) = self.triggers.peek() {
+        let pop_at = if let Some(hc_sim::Trigger { at, .. }) = self.triggers.peek() {
             *at
         } else {
             // early return
@@ -1215,7 +1215,7 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
         batch
     }
 
-    fn pop_delta(&mut self, delta: hpuc_sim::Cycle) -> Option<hpuc_sim::Trigger<E>> {
+    fn pop_delta(&mut self, delta: hc_sim::Cycle) -> Option<hc_sim::Trigger<E>> {
         // Pop next subsequent Ord::Equal events if any
         if let Some(next) = self.triggers.peek() {
             if next.at.cmp(&delta) == std::cmp::Ordering::Equal {
@@ -1229,14 +1229,14 @@ impl<E: hpuc_sim::Event> HpuEventStore<E> {
     }
 }
 
-impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
+impl<E: hc_sim::Event> hc_sim::Dispatch for HpuEventStore<E> {
     type Event = E;
 
-    fn contains_event(&self, event: &Self::Event, filter: Option<hpuc_sim::Cycle>) -> bool {
+    fn contains_event(&self, event: &Self::Event, filter: Option<hc_sim::Cycle>) -> bool {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .any(|hpuc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
+                .any(|hc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
@@ -1245,14 +1245,14 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
         }
     }
 
-    fn dispatch(&mut self, event: Self::Event, delay: Option<hpuc_sim::Cycle>) {
+    fn dispatch(&mut self, event: Self::Event, delay: Option<hc_sim::Cycle>) {
         let ra2m_cycle = self.ra2m_clk_d.from_tick(cur_tick());
         let dispatch_cycle =
-            hpuc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hpuc_sim::Cycle::ZERO);
+            hc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hc_sim::Cycle::ZERO);
 
         // NB: Discard event dispach in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
-            self.triggers.push(hpuc_sim::Trigger {
+            self.triggers.push(hc_sim::Trigger {
                 at: dispatch_cycle,
                 event,
             });
@@ -1260,11 +1260,11 @@ impl<E: hpuc_sim::Event> hpuc_sim::Dispatch for HpuEventStore<E> {
     }
 }
 
-// Convert tfhe-rs::DOp in hpuc_sim::DOp
+// Convert tfhe-rs::DOp in hc_sim::DOp
 // Required current hpu_core context for DOpId extraction
 fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
+    use hc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
     use hpu_sim::{DOp, DOpId, RawDOp};
-    use hpuc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
 
     let id = DOpId(pc);
     let raw = match asm_dop {
