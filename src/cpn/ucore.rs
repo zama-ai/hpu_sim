@@ -49,6 +49,7 @@ pub struct UCoreParams {
 }
 
 /// Store internal state of UCore module
+/// This structure held common value that could be edited by multiple tasks
 struct UCoreInner {
     config: UcoreConfig,
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
@@ -154,6 +155,20 @@ enum Event {
     Resolved(hpu_asm::MemId),
 }
 
+/// Internal structure used only by IrqAck task
+#[derive(Debug, Default)]
+struct IrqAck {
+    pdg_notify: VecDeque<(hpu_asm::NodeId, hpu_asm::UcorePayload)>,
+}
+
+/// Internal structure used only by IrqNotify task
+#[derive(Debug, Default)]
+struct IrqNotify {}
+
+/// Internal structure used only by IrqNotify task
+#[derive(Debug, Default)]
+struct IrqDma {}
+
 #[derive(Module)]
 pub struct UCore {
     params: UCoreParams,
@@ -165,14 +180,10 @@ pub struct UCore {
 
     // Interface with HpuCore
     // Slighly different from RTL, indeed iop_ctx is furnished for better context in logging
-    /// Half-duplex port to issue request to HpuCore
     #[port]
-    hpu_ctx: port::MasterPort<IOpPayload>,
+    hpu_ctx: port::ReqRespPort<IOpPayload>,
     #[port]
-    hpu_req: port::MasterPort<DOpPayload>,
-    /// Half-duplex port to received ack from HpuCore
-    #[port]
-    hpu_ack: port::SlavePort<IOpPayload>,
+    hpu_dop: port::ReqRespPort<DOpPayload>,
 
     /// Ctrl: Issue/Received control token for interboard synchronisation
     #[port]
@@ -183,7 +194,12 @@ pub struct UCore {
     dma: port::ReqRespPort<DmaBus<(u8, Addr)>>,
 
     prc: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    // Ucore internal state
+    // Some part are only used by sub-task and thus extracted from the main mutex
     inner: Mutex<UCoreInner>,
+    irq_ack_ctx: Mutex<IrqAck>,
+    irq_dma_ctx: Mutex<IrqDma>,
+    irq_notify_ctx: Mutex<IrqNotify>,
 }
 
 #[default_teardown]
@@ -204,13 +220,25 @@ impl UCore {
 
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
-            hpu_ctx: port::MasterPort::new("hpu_ctx", props.clone(), Some(params.axis_depth), None),
-            hpu_req: port::MasterPort::new("hpu_req", props.clone(), Some(params.axis_depth), None),
-            hpu_ack: port::SlavePort::new("hpu_ack", props.clone(), Some(params.axis_depth), None),
+            hpu_ctx: port::ReqRespPort::new(
+                "hpu_ctx",
+                props.clone(),
+                Some(params.axis_depth),
+                None,
+            ),
+            hpu_dop: port::ReqRespPort::new(
+                "hpu_dop",
+                props.clone(),
+                Some(params.axis_depth),
+                None,
+            ),
             ctrl: port::ReqRespPort::new("ctrl", props.clone(), None, None),
             dma: port::ReqRespPort::new("dma", props.clone(), Some(1), None),
             prc: Mutex::new(Vec::new()),
             inner: Mutex::new(inner),
+            irq_ack_ctx: Mutex::new(Default::default()),
+            irq_dma_ctx: Mutex::new(Default::default()),
+            irq_notify_ctx: Mutex::new(Default::default()),
             params,
             props,
         }
@@ -223,12 +251,14 @@ impl UCore {
         prc.push(spawn_prc!(Self::iopq_flush(asc)));
         let asc = self.clone();
         prc.push(spawn_prc!(Self::hpu_feed(asc)));
-        let asc = self.clone();
-        prc.push(spawn_prc!(Self::ackq_flush(asc)));
 
-        // Handle sync payload
+        // Mimic Irq sub-routines
         let asc = self.clone();
-        prc.push(spawn_prc!(Self::ctrl_flush(asc)));
+        prc.push(spawn_prc!(Self::irq_ack(asc)));
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::irq_dma(asc)));
+        let asc = self.clone();
+        prc.push(spawn_prc!(Self::irq_notify(asc)));
     }
 }
 
@@ -301,138 +331,6 @@ impl UCore {
         }
     }
 
-    async fn ackq_flush(self: Arc<Self>) {
-        let QueueConfig {
-            head_ofst,
-            tail_ofst,
-            data_ofst,
-            size_w,
-            mem,
-        } = &self.params.ackq;
-        let base_addr = match mem {
-            MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { .. } => {
-                panic!("Queue must be in DDR, it's currently the only way to have predictive addr")
-            }
-        };
-
-        loop {
-            // Check for room in the ack queue
-            let iop_head = {
-                let mut iop_head = 0_u32;
-                self.mem
-                    .read(self.properties(), base_addr + *head_ofst, &mut iop_head)
-                    .await
-                    .expect("Error while reading Ackq head");
-                iop_head
-            };
-
-            let iop_tail = {
-                let mut iop_tail = 0_u32;
-                self.mem
-                    .read(self.properties(), base_addr + *tail_ofst, &mut iop_tail)
-                    .await
-                    .expect("Error while reading Ackq head");
-                iop_tail
-            };
-
-            let word_free = *size_w as u32 - ((iop_head - iop_tail) % *size_w as u32);
-            let chunk_start = base_addr
-                + *data_ofst
-                + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>());
-            if word_free != 0 {
-                let iop_pld = self
-                    .hpu_ack
-                    .wait_pkt_ep(None)
-                    .await
-                    .expect("Issue with DOpPayload xfer")
-                    .unwrap_payload();
-
-                // Generate execution report
-                self.dump_iop_report(&iop_pld);
-
-                let (hid, iop) = {
-                    let mut inner = self.inner.lock().unwrap();
-                    let hid = inner.config.node_id;
-                    let iop = inner
-                        .iop_pdg
-                        .pop_front()
-                        .expect("Received IOp Ack without IOp pending");
-                    assert_eq!(
-                        iop.to_words(),
-                        iop_pld.inner.to_words(),
-                        "Mismatch between IOpPayload content and local store"
-                    );
-                    (hid, iop)
-                };
-                let iop_header_hex = iop.to_words()[0];
-                self.clone()
-                    .flush_dst_ldq(iop.get_iid())
-                    .await
-                    .expect("Error while flush Dst Store queue");
-
-                // Notify Other HpuNode of dst availability
-                let notify_order = iop
-                    .dst()
-                    .iter()
-                    .filter(|op| op.props.pos.0 == hid)
-                    .flat_map(|op| {
-                        let vec_len = op.props.vec_size.len();
-                        let blk_len = op.props.block.len();
-                        itertools::iproduct!(0..vec_len, 0..blk_len)
-                            .map(|(v, b)| v * blk_len + b)
-                            .flat_map(|bid| {
-                                let ucore_pld = hpu_asm::UcorePayload {
-                                    mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
-                                        pos: op.props.pos,
-                                        slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16),
-                                    }),
-                                    slot: None,
-                                    from_hid: hpu_asm::NodeId(hid),
-                                    iid: op.props.iid,
-                                };
-
-                                self.params
-                                    .cluster_nodes
-                                    .iter()
-                                    .filter(|n| **n != hid)
-                                    .map(|n| Network::new_wrapped(hid, *n, ucore_pld, None))
-                                    .collect::<Vec<_>>()
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-
-                self.ctrl
-                    .tx()
-                    .send_pkt_burst(notify_order)
-                    .await
-                    .expect("Error while notifying cluster");
-
-                // Release b2b_pool slot that belong to current iop
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .b2b_pool
-                    .release_tagged(iop.get_iid());
-
-                // write body
-                self.mem
-                    .write(self.properties(), chunk_start, &iop_header_hex)
-                    .await
-                    .expect("Error while reading Ackq body");
-
-                // Ack for value insertion
-                self.mem
-                    .write(self.properties(), base_addr + *head_ofst, &(iop_head + 1))
-                    .await
-                    .expect("Error while writing Iopq tail");
-            } else {
-                log!(|self| log::Category::Own, log::Verbosity::Info => => "Ackq is full");
-            }
-        }
-    }
-
     async fn hpu_feed(self: Arc<Self>) {
         loop {
             // Extract one Iop from stream
@@ -492,6 +390,7 @@ impl UCore {
                     Packet::wrap_payload(pld, Default::default())
                 };
                 self.hpu_ctx
+                    .tx()
                     .send_pkt(iop_pkt)
                     .await
                     .expect("Issue with ucore iop context update");
@@ -509,8 +408,103 @@ impl UCore {
         }
     }
 
-    /// This function handle ctrl message and update internal table accordingly
-    async fn ctrl_flush(self: Arc<Self>) {
+    /// This function modelize handler of hpu_core Ackq interrupt
+    async fn irq_ack(self: Arc<Self>) -> Result<(), anyhow::Error> {
+        loop {
+            // Wait for hpu dop ack event
+            let dop_sync = self
+                .hpu_dop
+                .rx()
+                .wait_pkt_ep(None)
+                .await
+                .expect("Issue with DOpPayload xfer")
+                .unwrap_payload();
+
+            let dop_sync = match dop_sync.inner {
+                hpu_asm::DOp::SYNC(dop_sync) => dop_sync,
+                _ => panic!("Invalid Dop received as ack. Only DOpSync must be returned"),
+            };
+
+            if dop_sync.0.is_inner_sync {
+                // Inner sync, retrived associated notify and issue it
+                let (to_hid, ucore_pld) = {
+                    let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
+                    irq_ack_ctx
+                        .pdg_notify
+                        .pop_front()
+                        .expect("Received inner_sync ack without pending notify")
+                };
+                log!(|self| log::Category::Own, log::Verbosity::Trace => ucore_pld => "Issue B2b Notify");
+                self.ctrl
+                    .tx()
+                    .send_pkt(Network::new_wrapped(
+                        ucore_pld.from_hid.0,
+                        to_hid.0,
+                        ucore_pld,
+                        None,
+                    ))
+                    .await?;
+            } else {
+                let (hid, iop) = {
+                    let mut inner = self.inner.lock().unwrap();
+                    let hid = inner.config.node_id;
+                    let iop = inner
+                        .iop_pdg
+                        .pop_front()
+                        .expect("Received IOp Ack without IOp pending");
+                    (hid, iop)
+                };
+
+                // Start iop teardown
+                // TODO update iop_teardown interface when ld_b2b_bg will be removed
+                self.clone()
+                    .iop_teardown(hpu_asm::NodeId(hid), &iop)
+                    .await
+                    .expect("Issue with iop teardown");
+
+                // Notify host
+                let iop_header_hex = iop.to_words()[0];
+                self.ackq_push(iop_header_hex).await;
+
+                // Retrieved associated iop context
+                // Only handle payload lifetime for logging (Ra2m only)
+                let iop_pld = self
+                    .hpu_ctx
+                    .rx()
+                    .wait_pkt_ep(None)
+                    .await
+                    .expect("Issue with IOpPayload xfer")
+                    .unwrap_payload();
+                // TODO check that iid in iop_ctx match with local storage
+                assert_eq!(
+                    iop.to_words(),
+                    iop_pld.inner.to_words(),
+                    "Mismatch between IOpPayload content and local store"
+                );
+                // Generate execution report
+                self.dump_iop_report(&iop_pld);
+            }
+        }
+    }
+
+    /// This function modelize handler of dma end_of_work signal
+    async fn irq_dma(self: Arc<Self>) {
+        loop {
+            // Wait for hpu ack event
+            let iop_pld = self
+                .dma
+                .rx()
+                .wait_pkt_ep(None)
+                .await
+                .expect("Issue with DOpPayload xfer")
+                .unwrap_payload();
+            // TODO
+            // Idea use sync body to keep associated notify data if any ?
+        }
+    }
+
+    /// This function handle notify message send by other nodes
+    async fn irq_notify(self: Arc<Self>) {
         loop {
             let ucore_pld = self
                 .ctrl
@@ -524,6 +518,7 @@ impl UCore {
             // Stall event handling while there is no iop_pending
             // Aims is to correctly detect user reset (i.e. start of new application)
             // and prevent clash with event_list
+            // TODO: Robustify user-reset detection
             let iop_empty = self.inner.lock().unwrap().iop_pdg.is_empty();
             if iop_empty {
                 event::Event::wait(&forge_event_name!(|self| "NoIOpPending")).await;
@@ -676,6 +671,9 @@ impl UCore {
             // Execute DOp directly or [patch] & deferred to Hpu
             let deferred_dop = match dop {
                 // Direct execution by Ucore
+                // NB: An inner sync is automatically append to the stream to enforce execution of previous Dop before notifying
+                // -> Insert a sync and register notify in the queue. When sync returned, issue associated notify
+                // NB': Sync couldn't be reorder by hpu_core, thus use a simple Fifo for notify bufering
                 hpu_asm::DOp::NOTIFY(hpu_asm::dop::DOpNotify(inner)) => {
                     // Build Ucore payload based on context and current DOp
                     let raw_cid = match inner.slot {
@@ -698,13 +696,14 @@ impl UCore {
                         iid: iop.get_iid(),
                     };
 
-                    log!(|self| log::Category::Own, log::Verbosity::Trace => ucore_pld => "Issue B2b Notify");
-                    self.ctrl
-                        .tx()
-                        .send_pkt(Network::new_wrapped(from_hid.0, to_hid.0, ucore_pld, None))
-                        .await?;
-
-                    None
+                    log!(|self| log::Category::Own, log::Verbosity::Trace => ucore_pld => "Register B2b Notify for later execution");
+                    // Register notify in the queue
+                    let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
+                    irq_ack_ctx.pdg_notify.push_back((to_hid, ucore_pld));
+                    // Push sync in the stream
+                    let inner_sync =
+                        hpu_asm::dop::DOpSync::new(iop.get_iid(), Some(inner.flag)).into();
+                    Some(inner_sync)
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(inner)) => {
                     let hash = UcoreHash::User {
@@ -855,7 +854,7 @@ impl UCore {
             if let Some(dop) = deferred_dop {
                 // Wrapped DOp in packet and send them to HpuCore
                 let dop_pkt = Packet::wrap_payload(DOpPayload::new(dop), Default::default());
-                self.hpu_req.send_pkt(dop_pkt).await?;
+                self.hpu_dop.tx().send_pkt(dop_pkt).await?;
                 // TODO refine this maybe use a more accurate timing model inside the ucore
                 delay::Delay::wait_for(
                     (unit::Time::from(self.props.clock_domain().frequency()) * 2.0).into(),
@@ -865,9 +864,9 @@ impl UCore {
         }
 
         // Ucore is in charge of Sync insertion
-        let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid()).into();
+        let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid(), None).into();
         let sync_dop_pkt = Packet::wrap_payload(DOpPayload::new(sync_dop), Default::default());
-        self.hpu_req.send_pkt(sync_dop_pkt).await?;
+        self.hpu_dop.tx().send_pkt(sync_dop_pkt).await?;
         log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translate and deferred to Hpu");
         Ok(())
     }
@@ -1030,6 +1029,129 @@ impl UCore {
                 .expect("Issue with ld_b2b background task");
         }
         Ok(())
+    }
+
+    /// Iop teardown
+    /// Flush associated deffered work and update internal state
+    /// Also Notify all HpuNode of iop_done
+    /// Enable all hpu to know that the IOp is done and view all associated dest operands as valid
+    /// Kept other one in the queue
+    async fn iop_teardown(
+        self: Arc<Self>,
+        node_id: hpu_asm::NodeId,
+        iop: &hpu_asm::IOp,
+    ) -> Result<(), anyhow::Error> {
+        // Flush deferred load queue
+        self.clone()
+            .flush_dst_ldq(iop.get_iid())
+            .await
+            .expect("Error while flush Dst Store queue");
+
+        // Notify Other HpuNode of dst availability
+        // TODO replace with iop done notify to reduce notify bandwidth
+        let notify_order = iop
+            .dst()
+            .iter()
+            .filter(|op| op.props.pos == node_id)
+            .flat_map(|op| {
+                let vec_len = op.props.vec_size.len();
+                let blk_len = op.props.block.len();
+                itertools::iproduct!(0..vec_len, 0..blk_len)
+                    .map(|(v, b)| v * blk_len + b)
+                    .flat_map(|bid| {
+                        let ucore_pld = hpu_asm::UcorePayload {
+                            mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
+                                pos: op.props.pos,
+                                slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16),
+                            }),
+                            slot: None,
+                            from_hid: node_id,
+                            iid: op.props.iid,
+                        };
+
+                        self.params
+                            .cluster_nodes
+                            .iter()
+                            .filter(|n| **n != node_id.0)
+                            .map(|n| Network::new_wrapped(node_id.0, *n, ucore_pld, None))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        self.ctrl
+            .tx()
+            .send_pkt_burst(notify_order)
+            .await
+            .expect("Error while notifying cluster");
+
+        // Release b2b_pool slot that belong to current iop
+        self.inner
+            .lock()
+            .unwrap()
+            .b2b_pool
+            .release_tagged(iop.get_iid());
+        Ok(())
+    }
+
+    async fn ackq_push(&self, iop_header_hex: hpu_asm::iop::IOpWordRepr) {
+        let QueueConfig {
+            head_ofst,
+            tail_ofst,
+            data_ofst,
+            size_w,
+            mem,
+        } = &self.params.ackq;
+        let base_addr = match mem {
+            MemKind::Ddr { offset } => offset,
+            MemKind::Hbm { .. } => {
+                panic!("Queue must be in DDR, it's currently the only way to have predictive addr");
+            }
+        };
+        let iop_head = loop {
+            // Check for room in the ack queue
+            let iop_head = {
+                let mut iop_head = 0_u32;
+                self.mem
+                    .read(self.properties(), base_addr + *head_ofst, &mut iop_head)
+                    .await
+                    .expect("Error while reading Ackq head");
+                iop_head
+            };
+
+            let iop_tail = {
+                let mut iop_tail = 0_u32;
+                self.mem
+                    .read(self.properties(), base_addr + *tail_ofst, &mut iop_tail)
+                    .await
+                    .expect("Error while reading Ackq head");
+                iop_tail
+            };
+
+            let word_free = *size_w as u32 - ((iop_head - iop_tail) % *size_w as u32);
+            if word_free == 0 {
+                log!(|self| log::Category::Own, log::Verbosity::Info => => "Ackq is full");
+                delay::Delay::wait_for(self.params.polling_rate.into()).await;
+            } else {
+                break iop_head;
+            }
+        };
+
+        let chunk_start =
+            base_addr + *data_ofst + ((iop_head as usize % *size_w) * std::mem::size_of::<u32>());
+
+        // write body
+        self.mem
+            .write(self.properties(), chunk_start, &iop_header_hex)
+            .await
+            .expect("Error while reading Ackq body");
+
+        // Ack for value insertion
+        self.mem
+            .write(self.properties(), base_addr + *head_ofst, &(iop_head + 1))
+            .await
+            .expect("Error while writing Iopq tail");
     }
 
     /// Check around event insertion in event_list

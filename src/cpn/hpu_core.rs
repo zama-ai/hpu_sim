@@ -133,15 +133,12 @@ pub struct HpuCore {
     mem: port::ReqRespPort<membus::MemBus>,
 
     /// iop_ctx: Received IOp context
-    /// Use to construct correct report
+    /// Use to construct correct report and IOp lifetime
     #[port]
-    ctx: port::SlavePort<IOpPayload>,
+    hpu_ctx: port::ReqRespPort<IOpPayload>,
     /// req: Received DOp request
     #[port]
-    req: port::SlavePort<DOpPayload>,
-    /// outbound: Send DOp Ack
-    #[port]
-    ack: port::MasterPort<IOpPayload>,
+    hpu_dop: port::ReqRespPort<DOpPayload>,
     prc: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 
     inner: Mutex<HpuCoreInner>,
@@ -152,9 +149,8 @@ impl HpuCore {
         let props = Arc::new(props);
         Self {
             mem: port::ReqRespPort::new("mem", props.clone(), Some(1), None),
-            ctx: port::SlavePort::new("ctx", props.clone(), None, None),
-            req: port::SlavePort::new("req", props.clone(), None, None),
-            ack: port::MasterPort::new("ack", props.clone(), None, None),
+            hpu_ctx: port::ReqRespPort::new("hpu_ctx", props.clone(), None, None),
+            hpu_dop: port::ReqRespPort::new("hpu_dop", props.clone(), None, None),
             prc: Mutex::new(Vec::new()),
             inner: Mutex::new(HpuCoreInner::new(&params, *props.clock_domain())),
             params,
@@ -191,7 +187,7 @@ impl HpuCore {
 impl HpuCore {
     async fn ctx_feed(self: Arc<Self>) {
         loop {
-            let iop = self.ctx.wait_pkt().await.unwrap_payload();
+            let iop = self.hpu_ctx.rx().wait_pkt().await.unwrap_payload();
 
             // Insert IOp in local context
             {
@@ -203,7 +199,8 @@ impl HpuCore {
     async fn inner_feed(self: Arc<Self>) {
         loop {
             let dop = self
-                .req
+                .hpu_dop
+                .rx()
                 .wait_pkt_ep(None)
                 .await
                 .expect("Issue with DOpPayload xfer")
@@ -730,6 +727,9 @@ impl HpuCore {
             log!(|self| log::Category::Own, log::Verbosity::Debug => inner.retired_pc, dop);
         }
 
+        // Dump DOpPayload to trace
+        trace!(|self| trace::Kind::Pipeline => dop);
+
         if let hpu_asm::DOp::SYNC(_) = &dop.inner {
             if self.params.sim_trace {
                 let mut inner = self.inner.lock().unwrap();
@@ -753,19 +753,27 @@ impl HpuCore {
                 .pop_front()
                 .expect("Sync received without associated context");
 
-            // Push ack in stream
-            let ack_pkt = Packet::wrap_payload(
+            // Push iop in stream for lifetime tracking
+            let iop_pkt = Packet::wrap_payload(
                 iop,
                 PacketOptions {
                     timed: false,
                     ..Default::default()
                 },
             );
-            self.ack.fwd_pkt(ack_pkt).await;
+            self.hpu_ctx.tx().fwd_pkt(iop_pkt).await;
+
+            // Notify Ucore with sync ack
+            let ack_pkt = Packet::wrap_payload(
+                dop,
+                PacketOptions {
+                    timed: false,
+                    ..Default::default()
+                },
+            );
+            self.hpu_dop.tx().fwd_pkt(ack_pkt).await;
         }
 
-        // Dump DOpPayload to trace
-        trace!(|self| trace::Kind::Pipeline => dop);
         // Update retired_pc
         self.inner.lock().unwrap().retired_pc += 1;
 
