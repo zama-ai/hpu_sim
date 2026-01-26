@@ -477,7 +477,7 @@ impl Regmap {
             }
 
             _ => {
-                log!(|self| log::Category::Own, log::Verbosity::Info => register_name => "Register not hooked for reading, return 0");
+                log!(|self| log::Category::Own, log::Verbosity::Trace=> register_name => "Register not hooked for reading, return 0");
                 0
             }
         }
@@ -735,7 +735,7 @@ impl Regmap {
             }
 
             _ => {
-                log!(|self| log::Category::Own, log::Verbosity::Info => register_name => "Register not hooked for writing");
+                log!(|self| log::Category::Own, log::Verbosity::Trace => register_name => "Register not hooked for writing");
             }
         }
     }

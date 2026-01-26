@@ -25,7 +25,7 @@ enum NotifyState {
     None,                            // Event not received yet
     ReadPending(hpu_asm::CtId),      // Event not received but read is already pending
     Received(hpu_asm::UcorePayload), // Event received but not handled yet
-    DmaPending(),                    // Event received and associated dma request already issued
+    DmaPending(usize),               // Event received and associated dma request already issued
     Resolved(hpu_asm::CtId),         // Event received and locally resolved in associated mem_id
 }
 
@@ -59,7 +59,8 @@ impl NotifyStore {
                     iid.0 as usize <= MAX_IID,
                     "Error: looking for event that belong to invalid IOpId"
                 );
-                let flag_hash = flag.pos.0 as usize; // TODO correctly build uuid based on UcoreHash
+                // let flag_hash = flag.pos.0 as usize; // TODO correctly build uuid based on UcoreHash
+                let flag_hash = flag.slot.0 as usize; // TODO correctly build uuid based on UcoreHash
                 assert!(
                     flag_hash <= MAX_UCORE_EVENTS,
                     "Error: looking for event with invalid user flag"
@@ -428,6 +429,7 @@ impl UCore {
             };
 
             if let Some(iop) = iop_pdg {
+                self.load_config().await;
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
                 {
@@ -464,7 +466,10 @@ impl UCore {
                             }
                         }
                     }
-
+                    println!(
+                        "@{} -> Start of IOp: {:?}",
+                        inner.config.node_id, inner.dst_ldq
+                    );
                     inner.cur_iid = iop.get_iid();
                     inner.iop_pdg.push_back(iop.clone());
                     event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
@@ -507,6 +512,7 @@ impl UCore {
                 .await
                 .expect("Issue with DOpPayload xfer")
                 .unwrap_payload();
+            log!(|self| log::Category::Own, log::Verbosity::Debug => dop_sync => "Sync received");
 
             let dop_sync = match dop_sync.inner {
                 hpu_asm::DOp::SYNC(dop_sync) => dop_sync,
@@ -585,19 +591,40 @@ impl UCore {
                 .expect("Issue with Dma xfer")
                 .unwrap_payload();
 
-            // Extract associated req info
-            let (hash, cid) = {
-                let mut irq_dma_ctx = self.irq_dma_ctx.lock().unwrap();
-                irq_dma_ctx
-                    .pdg_req
-                    .pop_front()
-                    .expect("Received dma_resp without pending request")
-            };
+            log!(|self| log::Category::Own, log::Verbosity::Debug => dma_resp => "Dma ack received");
+
+            // View hash of current request
+            let mut irq_dma_ctx = self.irq_dma_ctx.lock().unwrap();
+            let (hash, _cid) = irq_dma_ctx
+                .pdg_req
+                .front()
+                .expect("Received dma_resp without pending request");
 
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
+            let node_id = inner.config.node_id;
             let state = &mut inner.notify_store[&hash];
-            *state = NotifyState::Resolved(cid);
+            match state {
+                NotifyState::DmaPending(pdg_cnt) => {
+                    println!("@{node_id}[{hash:?}] => Current pending_cnt {pdg_cnt}");
+                    if *pdg_cnt == 1 {
+                        // All pem_pc slice where retrieved remove from pending request
+                        // and update state
+                        let (hash, cid) = irq_dma_ctx
+                            .pdg_req
+                            .pop_front()
+                            .expect("Received dma_resp without pending request");
+                        *state = NotifyState::Resolved(cid);
+
+                        // Notify to wake up pending task
+                        event::Event::triggered(&forge_event_name!(|self| "resolved_evt"), None);
+                        println!("@{node_id}[{hash:?}] event triggered");
+                    } else {
+                        *pdg_cnt -= 1;
+                    }
+                }
+                _ => panic!("Received dma_resp for entry in invalid state {state:?}"),
+            }
         }
     }
 
@@ -621,6 +648,8 @@ impl UCore {
                 .expect("Issue with Ctrl xfer")
                 .inner_unwrap()
                 .unwrap_payload();
+
+            log!(|self| log::Category::Own, log::Verbosity::Debug => ucore_pld => "Notify received");
 
             // Compute hash
             let hash = match &ucore_pld.mode {
@@ -647,8 +676,8 @@ impl UCore {
                     NotifyState::ReadPending(cid) => {
                         let cid = *cid;
                         // Update state
-
-                        *state = NotifyState::DmaPending();
+                        // NB: A dedicated request is made for each Ct slice
+                        *state = NotifyState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
 
                         // Must trigger dma request
                         Some((inner.config.node_id, hash, ucore_pld, cid))
@@ -734,6 +763,31 @@ impl UCore {
         Pattern::Simple(ct_chunk_size_b.Byte())
     }
 
+    /// Update node configuration from DDR
+    async fn load_config(&self) {
+        let fw_base_addr = match self.params.fw_pc {
+            MemKind::Ddr { offset } => offset,
+            MemKind::Hbm { .. } => {
+                panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
+            }
+        };
+
+        let fw_cfg_raw = self
+            .mem
+            .read_bytes(
+                self.properties(),
+                fw_base_addr,
+                std::mem::size_of::<UcoreConfig>(),
+            )
+            .await
+            .expect("Error while reading fw config");
+
+        let fw_cfg = *bytemuck::from_bytes(fw_cfg_raw.as_slice());
+
+        let mut inner = self.inner.lock().unwrap();
+        inner.config = fw_cfg;
+    }
+
     /// Read DOp stream from Firmware memory
     async fn load_fw(&self, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
         let fw_base_addr = match self.params.fw_pc {
@@ -744,24 +798,9 @@ impl UCore {
         };
         let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>();
 
-        // Read config from runtime config area
-        // Update inner config and extract hid
+        // Read node if from config
         let hid = {
-            let fw_cfg_raw = self
-                .mem
-                .read_bytes(
-                    self.properties(),
-                    fw_base_addr,
-                    std::mem::size_of::<UcoreConfig>(),
-                )
-                .await
-                .expect("Error while reading fw config");
-
-            let fw_cfg = *bytemuck::from_bytes(fw_cfg_raw.as_slice());
-
-            let mut inner = self.inner.lock().unwrap();
-            inner.config = fw_cfg;
-
+            let inner = self.inner.lock().unwrap();
             inner.config.node_id
         };
 
@@ -949,17 +988,25 @@ impl UCore {
                                         cid
                                     } else {
                                         // Remote access
-                                        // Allocate temporary value in the B2B_pool
-                                        let tmp_cid = inner.b2b_pool.get_tagged(iop.get_iid());
-
                                         // Create associated DstLdOrder in the queue if it doesn't exist
                                         match inner.dst_ldq.iter().enumerate().find(|(_i, x)| {
                                             x.iid == inner.cur_iid
                                                 && x.operand == operand
                                                 && x.cid == cid
                                         }) {
-                                            Some(_) => {}
+                                            Some((_pos, order)) => {
+                                                assert!(
+                                                    matches!(order.action, LdAction::Notify(_)),
+                                                    "Clash with alread present order {order:?}[{:?}",
+                                                    inner.dst_ldq
+                                                );
+                                                order.cid
+                                            }
                                             None => {
+                                                // Allocate temporary value in the B2B_pool
+                                                let tmp_cid =
+                                                    inner.b2b_pool.get_tagged(iop.get_iid());
+
                                                 // Create associated entry.
                                                 // NB: only occured for remote access case (i.e. no direct deletion afterward)
                                                 let order = DstLdOrder {
@@ -968,10 +1015,10 @@ impl UCore {
                                                     cid,
                                                     action: LdAction::Notify(tmp_cid),
                                                 };
-                                                inner.dst_ldq.push(order)
+                                                inner.dst_ldq.push(order);
+                                                tmp_cid
                                             }
-                                        };
-                                        tmp_cid
+                                        }
                                     };
 
                                     hpu_asm::MemId::Addr(op_cid)
@@ -1010,7 +1057,7 @@ impl UCore {
         let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid(), None).into();
         let sync_dop_pkt = Packet::wrap_payload(DOpPayload::new(sync_dop), Default::default());
         self.hpu_dop.tx().send_pkt(sync_dop_pkt).await?;
-        log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translate and deferred to Hpu");
+        log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translated and deferred to Hpu");
         Ok(())
     }
 
@@ -1043,7 +1090,7 @@ impl UCore {
                 let inner_data = self.inner.lock().unwrap();
                 let state = inner_data.notify_store[key];
                 match state {
-                    NotifyState::Resolved(mem_id) => Some(mem_id),
+                    NotifyState::Resolved(cid) => Some(cid),
                     _ => None,
                 }
             };
@@ -1068,6 +1115,7 @@ impl UCore {
             (hid, cur_iid, state)
         };
 
+        log!(|self| log::Category::Own, log::Verbosity::Debug => hash, dst, state => "Register B2b load");
         // Update associated state
         let state_updt = match state {
             NotifyState::None => {
@@ -1088,7 +1136,9 @@ impl UCore {
                         None => self.inner.lock().unwrap().b2b_pool.get_tagged(iid),
                     };
                     self.start_dma(hid, hash.clone(), ucore_pld, dst_cid).await;
-                    Some(NotifyState::DmaPending())
+                    Some(NotifyState::DmaPending(
+                        self.params.rtl_params.pc_params.pem_pc,
+                    ))
                 } else {
                     // Allocate temporary value in the B2B_pool if required
                     let dst_cid = match dst {
@@ -1111,9 +1161,11 @@ impl UCore {
                 };
                 self.start_dma(hid, hash.clone(), payload.clone(), dst_cid)
                     .await;
-                Some(NotifyState::DmaPending())
+                Some(NotifyState::DmaPending(
+                    self.params.rtl_params.pc_params.pem_pc,
+                ))
             }
-            NotifyState::DmaPending() => {
+            NotifyState::DmaPending(_) => {
                 /* Do Nothing */
                 None
             }
@@ -1136,6 +1188,8 @@ impl UCore {
         payload: hpu_asm::UcorePayload,
         dst_cid: hpu_asm::CtId,
     ) {
+        log!(|self| log::Category::Own, log::Verbosity::Debug => hash, payload, dst_cid => "Dma registered");
+
         let src_addr = self.cid_to_addr(payload.slot.expect("LD_B2B required slot information"));
         let dst_addr = self.cid_to_addr(dst_cid);
 
@@ -1178,6 +1232,7 @@ impl UCore {
                 .partition_in_place(|e| e.iid != for_iid);
             (inner.config.node_id, inner.dst_ldq.split_off(remains_elem))
         };
+        log!(|self| log::Category::Own, log::Verbosity::Debug => cur_ord => "Load queue for current IOp");
 
         // 2. Execute DstLdOrder
         let (notify_ord, read_ord) = {
@@ -1263,6 +1318,7 @@ impl UCore {
             .iter()
             .filter(|op| op.props.pos == node_id)
             .flat_map(|op| {
+                log!(|self| log::Category::Own, log::Verbosity::Debug => op => "Dst avail notify");
                 let vec_len = op.props.vec_size.len();
                 let blk_len = op.props.block.len();
                 itertools::iproduct!(0..vec_len, 0..blk_len)
@@ -1312,6 +1368,7 @@ impl UCore {
             size_w,
             mem,
         } = &self.params.ackq;
+        log!(|self| log::Category::Own, log::Verbosity::Debug => iop_header_hex => "IOp is done");
         let base_addr = match mem {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
@@ -1368,7 +1425,8 @@ impl UCore {
     fn dump_iop_report(&self, pld: &IOpPayload) {
         // Display in console for user real-time inspection
         println!(
-            "Executed IOp: {} in {} [{} timeout]",
+            "Ucore {}: Executed IOp: {} in {} [{} timeout]",
+            self.inner.lock().unwrap().config.node_id,
             pld.inner.asm_opcode(),
             pld.get_history().duration(),
             pld.batch_timeout.len()
