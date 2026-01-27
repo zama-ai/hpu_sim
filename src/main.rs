@@ -226,7 +226,7 @@ fn elaborate(
         },
         dma: ra2m_cpn::net::NDmaParams {
             node_id: 0,
-            inflight_req: 4,
+            inflight_req: config.board.ct_pc.len(), // NB: pc request are issued in burst
             frontend_latency: types::Latency::Cycle(1.cycles()),
             forward_latency: types::Latency::Cycle(1.cycles()),
             bandwidth: 25.GB_s(),
