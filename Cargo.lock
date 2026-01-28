@@ -1966,8 +1966,6 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 [[package]]
 name = "ra2m"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4eb2be70b56ec4aa00d7ab0806f5f54604031c2ca9e49efd381c28b0524773d"
 dependencies = [
  "ra2m_cpn",
  "ra2m_ffi 0.1.0",
@@ -1977,8 +1975,6 @@ dependencies = [
 [[package]]
 name = "ra2m_cpn"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e468562f3e23ade278e5b6f345c9431c3a94131f2521fd8e0d8820106b3de365"
 dependencies = [
  "crossbeam",
  "getset",
@@ -1993,8 +1989,6 @@ dependencies = [
 [[package]]
 name = "ra2m_ffi"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c21ec2f10e2db58de9d56c7656504b7dc31516ee3bbb994467125d52a1d157c"
 dependencies = [
  "ra2m_ffi_ipc",
 ]
@@ -2011,8 +2005,6 @@ dependencies = [
 [[package]]
 name = "ra2m_ffi_ipc"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82bea299c4d9877a811cf6e7cdc294e4ef82995f2846393e39eaf1dc964f6040"
 dependencies = [
  "ipc-channel",
  "serde",
@@ -2022,8 +2014,6 @@ dependencies = [
 [[package]]
 name = "ra2m_sim"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4987267bb5d41a9cf15ec677c00f2d768d89c26a4480b17a4a84d9d3f6b62727"
 dependencies = [
  "ra2m_sim_containers",
  "ra2m_sim_kernel",
@@ -2034,8 +2024,6 @@ dependencies = [
 [[package]]
 name = "ra2m_sim_containers"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "073142c7986cc45a34e631e7609cc067adb65dc6d2f38f66d4b3fc64007d90dd"
 dependencies = [
  "anyhow",
  "serde",
@@ -2045,8 +2033,6 @@ dependencies = [
 [[package]]
 name = "ra2m_sim_kernel"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0f0ea71f040447106109627121882e524b86c78448ad79f22098fd166332db8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2071,8 +2057,6 @@ dependencies = [
 [[package]]
 name = "ra2m_sim_macros"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d3eec2e7cef2d812e4fbb557080c9327801e82069455c3fd26545c42d78b457"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2082,8 +2066,6 @@ dependencies = [
 [[package]]
 name = "ra2m_sim_output"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4728891046d59b85bf610ac239d8da9629287af66e17b2c2e05e75d0b4f1cfd0"
 dependencies = [
  "bincode",
  "chrono",

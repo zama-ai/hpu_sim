@@ -25,8 +25,8 @@ debug-assertions = false
 
 [dependencies]
 # Swap them if want to rely on local version of ra2m
-# ra2m = {path="../ra2m", features = []}
-ra2m = {version = "0.1.0", features = []}
+ra2m = {path="../ra2m", features = []}
+# ra2m = {version = "0.1.0", features = []}
 tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 # tfhe = { version = "1.4", features = ["hpu", "hpu-debug"] }
 hc_sim = { path = "../hpu_compiler/hc_sim"}
