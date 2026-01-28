@@ -19,9 +19,10 @@ use std::{
 
 use super::{DOpPayload, IOpPayload};
 
-// Handle notify state in a global structure
+// Handle variable state
+// Use to track lifetime of inter-hpu communication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NotifyState {
+enum VarState {
     None,                            // Event not received yet
     ReadPending(hpu_asm::CtId),      // Event not received but read is already pending
     Received(hpu_asm::UcorePayload), // Event received but not handled yet
@@ -29,77 +30,241 @@ enum NotifyState {
     Resolved(hpu_asm::CtId),         // Event received and locally resolved in associated mem_id
 }
 
+// Handle arguments state
+// It track state of current iop variables
+const MAX_SRC_VARS: usize = 64; // at most 64 source in IOp
+const MAX_DST_VARS: usize = 32; // at most 32 destination in IOp
+const MAX_VARS_BLK: usize = 64; // at most 128b ciphertext
+#[derive(Debug, Clone)]
+struct ArgStore {
+    cur_iop: Option<hpu_asm::IOp>,
+    src_var: [VarState; MAX_SRC_VARS * MAX_VARS_BLK],
+    dst_var: [VarState; MAX_DST_VARS * MAX_VARS_BLK],
+}
+
+impl Default for ArgStore {
+    fn default() -> Self {
+        Self {
+            cur_iop: Default::default(),
+            src_var: [VarState::None; MAX_SRC_VARS * MAX_VARS_BLK],
+            dst_var: [VarState::None; MAX_DST_VARS * MAX_VARS_BLK],
+        }
+    }
+}
+
+impl ArgStore {
+    fn new(iop: hpu_asm::IOp) -> Self {
+        let mut dflt = Self::default();
+        dflt.reset(iop);
+        dflt
+    }
+
+    /// Reset internal state
+    fn reset(&mut self, iop: hpu_asm::IOp) {
+        self.cur_iop = Some(iop);
+        self.src_var = [VarState::None; MAX_SRC_VARS * MAX_VARS_BLK];
+        self.dst_var = [VarState::None; MAX_DST_VARS * MAX_VARS_BLK];
+    }
+
+    /// get reference of {blk} state of destination variable at position {var}
+    fn src(&self, var: u8, blk: u8) -> &VarState {
+        assert!(
+            (var as usize) < MAX_SRC_VARS,
+            "invalid source variable index"
+        );
+        assert!((blk as usize) < MAX_VARS_BLK, "invalid block index");
+        &self.src_var[MAX_VARS_BLK * (var as usize) + blk as usize]
+    }
+
+    fn src_mut(&mut self, var: u8, blk: u8) -> &mut VarState {
+        assert!(
+            (var as usize) < MAX_SRC_VARS,
+            "invalid source variable index"
+        );
+        assert!((blk as usize) < MAX_VARS_BLK, "invalid block index");
+        &mut self.src_var[MAX_VARS_BLK * (var as usize) + blk as usize]
+    }
+
+    /// Get list of src that belong to given iid
+    fn src_idx_of(&self, iid: &hpu_asm::IOpId) -> Vec<(u8, u8)> {
+        if let Some(iop) = &self.cur_iop {
+            iop.src()
+                .iter()
+                .enumerate()
+                .filter(|(_, op)| op.props.iid == *iid)
+                .flat_map(|(i, op)| {
+                    (0..op.props.block.len())
+                        .map(|b| (i as u8, b as u8))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    }
+    
+    /// Get IopId of var/blk
+    fn src_iid(&self, var: u8, blk: u8) -> hpu_asm::IOpId {
+        let iop = self
+            .cur_iop
+            .as_ref()
+            .expect("Look for Cid of src while there is no iop registered");
+        iop.props.iid
+    }
+
+    /// Get NodeId of var/blk
+    fn src_hid(&self, var: u8, blk: u8) -> hpu_asm::NodeId {
+        let iop = self
+            .cur_iop
+            .as_ref()
+            .expect("Look for Cid of src while there is no iop registered");
+        iop.props.pos
+    }
+
+    /// Get CtId of var/blk
+    fn src_cid(&self, var: u8, blk: u8) -> hpu_asm::CtId {
+        let iop = self
+            .cur_iop
+            .as_ref()
+            .expect("Look for Cid of src while there is no iop registered");
+        hpu_asm::CtId(iop.src()[var as usize].addr.base_cid.0 + blk as u16)
+    }
+
+    /// get reference of {blk} state of destination variable at position {var}
+    fn dst(&self, var: u8, blk: u8) -> &VarState {
+        assert!(
+            (var as usize) < MAX_DST_VARS,
+            "invalid destination variable index"
+        );
+        assert!((blk as usize) < MAX_VARS_BLK, "invalid block index");
+        &self.dst_var[MAX_VARS_BLK * (var as usize) + blk as usize]
+    }
+
+    fn dst_mut(&mut self, var: u8, blk: u8) -> &mut VarState {
+        assert!(
+            (var as usize) < MAX_DST_VARS,
+            "invalid destination variable index"
+        );
+        assert!((blk as usize) < MAX_VARS_BLK, "invalid block index");
+        &mut self.dst_var[MAX_VARS_BLK * (var as usize) + blk as usize]
+    }
+}
+
 const MAX_IID: usize = 1 << 8; // IOpId expressed on 8b
+
+/// Handle IOp state
+/// Keep track of IOpDone notify
+/// Use to know state of associated variables
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IOpState([u8; MAX_IID]);
+
+impl IOpState {
+    /// Check IOp iid done status
+    /// IOp is considered done when all involved nodes have finish
+    fn is_done(&self, iid: hpu_asm::IOpId) -> bool {
+        self.0[iid.0 as usize] == 0
+    }
+
+    /// Register ack from a node
+    /// Ack are send with associated involved nodes.
+    /// NB: An ack register on a is_done entry rearm the counter and clean var states
+    fn node_ack(&mut self, iid: hpu_asm::IOpId, iop_nodes: u8) {
+        if self.is_done(iid) {
+            // Ack considered as a new registration
+            self.0[iid.0 as usize] = iop_nodes - 1;
+        } else {
+            self.0[iid.0 as usize] -= 1;
+        }
+    }
+}
+
+impl Default for IOpState {
+    fn default() -> Self {
+        Self([0; MAX_IID])
+    }
+}
+
 const MAX_USER_EVENTS: usize = 1 << 6; // User events expressed on 6b
-const MAX_UCORE_EVENTS: usize = 1 << 8; // TODO refine the max value here
 
-/// Struture able to store global Notify state
-/// Could be indexed by (hpu_id, flag_id) for ease of access
-struct NotifyStore {
-    user_store: [NotifyState; MAX_IID * MAX_USER_EVENTS],
-    ucore_store: [NotifyState; MAX_IID * MAX_UCORE_EVENTS],
-}
-
-impl NotifyStore {
-    fn index_of(hash: &UcoreHash) -> usize {
-        match hash {
-            UcoreHash::User { iid, flag } => {
-                assert!(
-                    iid.0 as usize <= MAX_IID,
-                    "Error: looking for event that belong to invalid IOpId"
-                );
-                assert!(
-                    flag.0 as usize <= MAX_USER_EVENTS,
-                    "Error: looking for event with invalid user flag"
-                );
-                iid.0 as usize * MAX_USER_EVENTS + flag.0 as usize
-            }
-            UcoreHash::Ucore { iid, flag } => {
-                assert!(
-                    iid.0 as usize <= MAX_IID,
-                    "Error: looking for event that belong to invalid IOpId"
-                );
-                // let flag_hash = flag.pos.0 as usize; // TODO correctly build uuid based on UcoreHash
-                let flag_hash = flag.slot.0 as usize; // TODO correctly build uuid based on UcoreHash
-                assert!(
-                    flag_hash <= MAX_UCORE_EVENTS,
-                    "Error: looking for event with invalid user flag"
-                );
-                iid.0 as usize * MAX_USER_EVENTS + flag_hash
-            }
-        }
-    }
-}
-
-impl std::ops::Index<&UcoreHash> for NotifyStore {
-    type Output = NotifyState;
-
-    fn index(&self, index: &UcoreHash) -> &Self::Output {
-        let idx = Self::index_of(index);
-        match index {
-            UcoreHash::Ucore { .. } => &self.ucore_store[idx],
-            UcoreHash::User { .. } => &self.user_store[idx],
-        }
-    }
-}
-
-impl std::ops::IndexMut<&UcoreHash> for NotifyStore {
-    fn index_mut(&mut self, index: &UcoreHash) -> &mut Self::Output {
-        let idx = Self::index_of(index);
-        match index {
-            UcoreHash::Ucore { .. } => &mut self.ucore_store[idx],
-            UcoreHash::User { .. } => &mut self.user_store[idx],
-        }
-    }
-}
+/// Struture able to store intra-hpu synchronisation state
+/// NB: `intra` means explicite synchronisation/xfer point in the DOp stream
+struct NotifyStore([VarState; MAX_IID * MAX_USER_EVENTS]);
 
 impl Default for NotifyStore {
     fn default() -> Self {
-        Self {
-            user_store: [NotifyState::None; MAX_IID * MAX_USER_EVENTS],
-            ucore_store: [NotifyState::None; MAX_IID * MAX_UCORE_EVENTS],
-        }
+        Self([VarState::None; MAX_IID * MAX_USER_EVENTS])
     }
+}
+
+impl NotifyStore {
+    fn index_from_tuple(iid: hpu_asm::IOpId, flag: hpu_asm::UserFlag) -> usize {
+        assert!(
+            iid.0 as usize <= MAX_IID,
+            "Error: looking for event that belong to invalid IOpId"
+        );
+        assert!(
+            flag.0 as usize <= MAX_USER_EVENTS,
+            "Error: looking for event with invalid user flag"
+        );
+        iid.0 as usize * MAX_USER_EVENTS + flag.0 as usize
+    }
+}
+
+impl std::ops::Index<&(hpu_asm::IOpId, hpu_asm::UserFlag)> for NotifyStore {
+    type Output = VarState;
+
+    fn index(&self, index: &(hpu_asm::IOpId, hpu_asm::UserFlag)) -> &Self::Output {
+        &self.0[Self::index_from_tuple(index.0, index.1)]
+    }
+}
+
+impl std::ops::IndexMut<&(hpu_asm::IOpId, hpu_asm::UserFlag)> for NotifyStore {
+    fn index_mut(&mut self, index: &(hpu_asm::IOpId, hpu_asm::UserFlag)) -> &mut Self::Output {
+        &mut self.0[Self::index_from_tuple(index.0, index.1)]
+    }
+}
+
+/// Local external load cache
+/// Cache some access to enable reuse across IOps
+/// Only store matching between {iid,hid,addr}  and local addr
+// TODO check correct lifetime handling of local buffer
+struct ArgCache {}
+/// Number of set in the cache
+const CACHE_SET: usize = 64;
+/// Number of way in each set
+const CACHE_WAY: usize = 4;
+
+impl Default for ArgCache {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+impl ArgCache {
+    fn try_hit(&self, iid: hpu_asm::IOpId, hpid: hpu_asm::NodeId, cid: hpu_asm::CtId) -> Option<hpu_asm::CtId> {
+        todo!()
+    }
+    fn register_ct(&mut self, iid: hpu_asm::IOpId, hpid: hpu_asm::NodeId, cid: hpu_asm::CtId, local_cid: hpu_asm::CtId){
+        todo!()
+    }
+}
+
+/// Define origin of variable
+/// Used to know where to find associated VarState
+#[derive(Debug, Clone, Copy)]
+enum VarMode {
+    User {
+        iid: hpu_asm::IOpId,
+        flag: hpu_asm::UserFlag,
+    },
+    ArgSrc {
+        var: u8,
+        blk: u8,
+    },
+    ArgDst {
+        var: u8,
+        blk: u8,
+    },
 }
 
 /// UCore parameters
@@ -143,7 +308,18 @@ struct UCoreInner {
     // Use to detect restart on the user side (i.e. start of a new application)
     cur_iid: hpu_asm::IOpId,
 
-    // Global state for notify state
+    /// Use to keep track of Iop state in the cluster
+    iop_state: IOpState,
+    /// Use for inter-iop sync (i.e. inferred by ucore based on vars position)
+    /// Its bound to current IOp context and reset upon each new IOp
+    arg_store: ArgStore,
+    /// Use for arg reuse across IOp
+    /// Indeed, ArgStore is a local context to iop. This structure is here to enable reuse of
+    /// local context while keeping the required memory space manageable
+    arg_cache: ArgCache,
+
+    /// Use for intra-iop sync (i.e. explicit in the DOp Stream)
+    /// Kept across IOp to handle multiple iid inflight in the cluster
     notify_store: NotifyStore,
 }
 
@@ -157,6 +333,9 @@ impl UCoreInner {
             b2b_pool: B2bPool::new(),
             dst_ldq: Vec::new(),
             cur_iid: hpu_asm::SW_IOP_ID,
+            iop_state: Default::default(),
+            arg_store: Default::default(),
+            arg_cache: Default::default(),
             notify_store: Default::default(),
         }
     }
@@ -255,7 +434,7 @@ struct IrqNotify {}
 /// Internal structure used only by IrqNotify task
 #[derive(Debug, Default)]
 struct IrqDma {
-    pdg_req: VecDeque<(UcoreHash, hpu_asm::CtId)>,
+    pdg_req: VecDeque<(VarMode, hpu_asm::CtId)>,
 }
 
 #[derive(Module)]
@@ -442,6 +621,7 @@ impl UCore {
                         // Flush internal state
                         inner.b2b_pool.release_all();
                         inner.event_list.clear();
+                        todo!("Correctly reset local context and irq handler data");
                     }
                     // Populate DstLdQueue
                     // Add entry for each sub-slot owned by local node
@@ -466,6 +646,10 @@ impl UCore {
                             }
                         }
                     }
+
+                    // Update ArgStore context
+                    inner.arg_store.reset(iop.clone());
+
                     println!(
                         "@{} -> Start of IOp: {:?}",
                         inner.config.node_id, inner.dst_ldq
@@ -541,20 +725,19 @@ impl UCore {
             } else {
                 // Probe associated iop properties
                 // Do not pop it to prevent irq_notify to be suspended (and prevent iop_teardown resolution)
-                let (hid, iid) = {
+                let (hid, iid, involved_nodes) = {
                     let inner = self.inner.lock().unwrap();
                     let hid = inner.config.node_id;
-                    let iid = inner
+                    let iop = inner
                         .iop_pdg
                         .front()
-                        .expect("Received IOp Ack without IOp pending")
-                        .get_iid();
+                        .expect("Received IOp Ack without IOp pending");
 
-                    (hid, iid)
+                    (hid, iop.get_iid(), iop.mapping().len() as u8)
                 };
 
                 // Start iop teardown
-                self.iop_teardown(hpu_asm::NodeId(hid), iid)
+                self.iop_teardown(hpu_asm::NodeId(hid), iid, involved_nodes)
                     .await
                     .expect("Issue with iop teardown");
 
@@ -606,9 +789,9 @@ impl UCore {
 
             log!(|self| log::Category::Own, log::Verbosity::Debug => dma_resp => "Dma ack received");
 
-            // View hash of current request
+            // View mode of current request
             let mut irq_dma_ctx = self.irq_dma_ctx.lock().unwrap();
-            let (hash, _cid) = irq_dma_ctx
+            let (var_mode, _cid) = irq_dma_ctx
                 .pdg_req
                 .front()
                 .expect("Received dma_resp without pending request");
@@ -616,22 +799,26 @@ impl UCore {
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
             let node_id = inner.config.node_id;
-            let state = &mut inner.notify_store[&hash];
+            let state = match var_mode {
+                VarMode::User { iid, flag } => &mut inner.notify_store[&(*iid, *flag)],
+                VarMode::ArgSrc { var, blk } => inner.arg_store.src_mut(*var, *blk),
+                VarMode::ArgDst { var, blk } => inner.arg_store.dst_mut(*var, *blk),
+            };
             match state {
-                NotifyState::DmaPending(pdg_cnt) => {
-                    println!("@{node_id}[{hash:?}] => Current pending_cnt {pdg_cnt}");
+                VarState::DmaPending(pdg_cnt) => {
+                    println!("@{node_id}[{var_mode:?}] => Current pending_cnt {pdg_cnt}");
                     if *pdg_cnt == 1 {
                         // All pem_pc slice where retrieved remove from pending request
                         // and update state
-                        let (hash, cid) = irq_dma_ctx
+                        let (mode, cid) = irq_dma_ctx
                             .pdg_req
                             .pop_front()
                             .expect("Received dma_resp without pending request");
-                        *state = NotifyState::Resolved(cid);
+                        *state = VarState::Resolved(cid);
 
                         // Notify to wake up pending task
                         event::Event::triggered(&forge_event_name!(|self| "resolved_evt"), None);
-                        println!("@{node_id}[{hash:?}] event triggered");
+                        println!("@{node_id}[{mode:?}] event triggered");
                     } else {
                         *pdg_cnt -= 1;
                     }
@@ -664,48 +851,98 @@ impl UCore {
 
             log!(|self| log::Category::Own, log::Verbosity::Debug => ucore_pld => "Notify received");
 
-            // Compute hash
-            let hash = match &ucore_pld.mode {
-                hpu_asm::UcorePayloadMode::Ucore(ucore_flag) => UcoreHash::Ucore {
-                    iid: ucore_pld.iid,
-                    flag: *ucore_flag,
-                },
-                hpu_asm::UcorePayloadMode::User(user_flag) => UcoreHash::User {
-                    iid: ucore_pld.iid,
-                    flag: *user_flag,
-                },
-            };
-            // Update glabal notify_store table
-            // NB: deffered dma_req to prevent issue with inner lock and async context
+            // Update internal state
+            let hpu_asm::UcorePayload {
+                mode,
+                slot,
+                from_hid,
+                iid,
+            } = ucore_pld;
+
             let dma_req = {
                 let mut inner = self.inner.lock().unwrap();
-                let state = &mut inner.notify_store[&hash];
-                match state {
-                    NotifyState::None => {
-                        // Simply update state
-                        *state = NotifyState::Received(ucore_pld);
-                        None
-                    }
-                    NotifyState::ReadPending(cid) => {
-                        let cid = *cid;
-                        // Update state
-                        // NB: A dedicated request is made for each Ct slice
-                        *state = NotifyState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+                let mut dma_req = Vec::new();
 
-                        // Must trigger dma request
-                        Some((inner.config.node_id, hash, ucore_pld, cid))
+                match mode {
+                    hpu_asm::UcorePayloadMode::Ucore(ucore_flag) => todo!(),
+                    hpu_asm::UcorePayloadMode::User(flag) => {
+                        let state = &mut inner.notify_store[&(iid, flag)];
+                        match state {
+                            VarState::None => {
+                                // Simply update state
+                                *state = VarState::Received(ucore_pld);
+                            }
+                            VarState::ReadPending(cid) => {
+                                // Update state and register associated dma req
+                                *state =
+                                    VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+
+                                let var_mode = VarMode::User { iid, flag };
+                                let from = (
+                                    from_hid.clone(),
+                                    slot.expect("ReadPending required notify with associated data"),
+                                );
+                                let to = (hpu_asm::NodeId(inner.config.node_id), *cid);
+
+                                dma_req.push((var_mode, from, to))
+                            }
+                            _ => {
+                                panic!(
+                                    "Ucore {}: Received duplicated event @{iid}::{flag:?} [{mode:?}, {from_hid:?}, {slot:?}]",
+                                    inner.config.node_id
+                                );
+                            }
+                        }
                     }
-                    _ => {
-                        panic!(
-                            "Ucore {}: Received duplicated event @{hash:?} => {ucore_pld:?}",
-                            inner.config.node_id
-                        );
+                    hpu_asm::UcorePayloadMode::IOpDone(iop_nodes) => {
+                        // Register ack
+                        inner.iop_state.node_ack(iid, iop_nodes);
+
+                        // Check if iop is done and execute associated pending work if any
+                        if inner.iop_state.is_done(iid) {
+                            let arg_store = &inner.arg_store;
+                            let pdg_ld_idx = arg_store
+                                .src_idx_of(&iid)
+                                .into_iter()
+                                .filter(|(var, blk)| {
+                                    matches!(arg_store.src(*var, *blk), VarState::ReadPending(_))
+                                })
+                                .collect::<Vec<_>>();
+
+                            for (var, blk) in pdg_ld_idx {
+                                let state = inner.arg_store.src_mut(var, blk);
+                                match state {
+                                    VarState::ReadPending(cid) => {
+                                        let cid = *cid;
+                                        // Update state
+                                        *state = VarState::DmaPending(
+                                            self.params.rtl_params.pc_params.pem_pc,
+                                        );
+
+                                        let var_mode = VarMode::ArgSrc { var, blk };
+                                        let from =
+                                            (from_hid.clone(), inner.arg_store.src_cid(var, blk));
+                                        let to = (hpu_asm::NodeId(inner.config.node_id), cid);
+
+                                        // Must trigger dma request
+                                        dma_req.push((var_mode, from, to));
+                                    }
+                                    _ => {
+                                        panic!(
+                                            "Ucore {}: Invalid VarState filtering",
+                                            inner.config.node_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
+                dma_req
             };
-
-            if let Some((hid, hash, pld, cid)) = dma_req {
-                self.start_dma(hid, hash, pld, cid).await;
+            // Executed pending request if any
+            for (mode, from, to) in dma_req {
+                self.start_dma(mode, from, to).await;
             }
 
             // Notify to wake up pending task
@@ -901,15 +1138,15 @@ impl UCore {
                     Some(inner_sync)
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(inner)) => {
-                    let hash = UcoreHash::User {
+                    let var_mode = VarMode::User {
                         iid: iop.get_iid(),
                         flag: inner.flag,
                     };
-                    self.wait_received(&hash).await;
+                    self.wait_received(&var_mode).await;
                     None
                 }
                 hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(inner)) => {
-                    //1. Construct hash
+                    //1. Construct mode
                     let raw_cid = match inner.slot {
                         hpu_asm::MemId::Addr(ct_id) => ct_id,
                         hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
@@ -920,13 +1157,13 @@ impl UCore {
 
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
-                    let hash = UcoreHash::User {
+                    let var_mode = VarMode::User {
                         iid: iop.get_iid(),
                         flag: inner.flag,
                     };
 
                     //2. Issue request
-                    self.ld_b2b(hash, Some(raw_cid)).await;
+                    self.ld_b2b(var_mode, Some(raw_cid)).await;
                     None
                 }
 
@@ -960,19 +1197,13 @@ impl UCore {
                                         hpu_asm::MemId::Addr(op_cid)
                                     } else {
                                         // Remote access
-                                        let hash = UcoreHash::Ucore {
-                                            iid: operand.props.iid,
-                                            flag: hpu_asm::UcoreFlag {
-                                                pos: operand.props.pos,
-                                                slot: op_cid,
-                                            },
-                                        };
+                                        let var_mode = VarMode::ArgSrc { var: tid, blk: bid };
 
                                         // Issue request
-                                        self.ld_b2b(hash.clone(), None).await;
+                                        self.ld_b2b(var_mode.clone(), None).await;
 
                                         // Wait for resolution (i.e. Dma read finished)
-                                        let cid = self.wait_resolved(&hash).await;
+                                        let cid = self.wait_resolved(&var_mode).await;
                                         hpu_asm::MemId::Addr(cid)
                                     }
                                 }
@@ -1075,15 +1306,19 @@ impl UCore {
     }
 
     /// Wait an event to be received
-    async fn wait_received(&self, key: &UcoreHash) {
+    async fn wait_received(&self, key: &VarMode) {
         log!(|self| log::Category::Own, log::Verbosity::Trace => key);
 
         // Hang DOp translation until associated event is received
         loop {
             let wait_ready = {
-                let inner_data = self.inner.lock().unwrap();
-                let state = inner_data.notify_store[key];
-                matches!(state, NotifyState::Received(_))
+                let inner = self.inner.lock().unwrap();
+                let state = match key {
+                    VarMode::User { iid, flag } => &inner.notify_store[&(*iid, *flag)],
+                    VarMode::ArgSrc { var, blk } => inner.arg_store.src(*var, *blk),
+                    VarMode::ArgDst { var, blk } => inner.arg_store.dst(*var, *blk),
+                };
+                matches!(state, VarState::Received(_))
             };
 
             if wait_ready {
@@ -1094,16 +1329,20 @@ impl UCore {
         }
     }
 
-    async fn wait_resolved(&self, key: &UcoreHash) -> hpu_asm::CtId {
+    async fn wait_resolved(&self, key: &VarMode) -> hpu_asm::CtId {
         log!(|self| log::Category::Own, log::Verbosity::Trace => key);
 
         // Hang DOp translation until associated event resolved
         loop {
             let resolved_in = {
-                let inner_data = self.inner.lock().unwrap();
-                let state = inner_data.notify_store[key];
+                let inner = self.inner.lock().unwrap();
+                let state = match key {
+                    VarMode::User { iid, flag } => &inner.notify_store[&(*iid, *flag)],
+                    VarMode::ArgSrc { var, blk } => inner.arg_store.src(*var, *blk),
+                    VarMode::ArgDst { var, blk } => inner.arg_store.dst(*var, *blk),
+                };
                 match state {
-                    NotifyState::Resolved(cid) => Some(cid),
+                    VarState::Resolved(cid) => Some(cid.clone()),
                     _ => None,
                 }
             };
@@ -1117,21 +1356,209 @@ impl UCore {
     }
 
     /// Load data from external board
-    /// Look at the current notify state and register required work accordingly
+    /// Look at the current context and register required work accordingly
     /// Hook Dma read request in the irq handler infrastructure
-    async fn ld_b2b(&self, hash: UcoreHash, dst: Option<hpu_asm::CtId>) {
+    async fn ld_b2b(&self, var_mode: VarMode, dst: Option<hpu_asm::CtId>) {
         // Update associated state
         // NB: deffered dma_req to prevent issue with inner lock and async context
         let dma_req = {
             let mut inner = self.inner.lock().unwrap();
-            let cur_iid = inner.cur_iid;
-            let state = inner.notify_store[&hash];
+            let UCoreInner {
+                cur_iid,
+                config,
+                ref mut notify_store,
+                ref mut arg_store,
+                ref arg_cache,
+                ref mut b2b_pool,
+                ref iop_state,
+                ..
+            } = *inner;
 
-            log!(|self| log::Category::Own, log::Verbosity::Debug => hash, dst, state => "Register B2b load");
+            log!(|self| log::Category::Own, log::Verbosity::Debug => var_mode, dst => "Register B2b load");
+
+            match var_mode {
+                /// Handle explicit DOp transfer inside an IOp
+                VarMode::User { iid, flag } => {
+                    let state = &mut notify_store[&(iid, flag)];
+
+                    match state {
+                        VarState::None => {
+                            // Allocate temporary value in the B2B_pool if required
+                            let dst_cid = match dst {
+                                Some(cid) => cid,
+                                None => b2b_pool.get_tagged(cur_iid),
+                            };
+                            *state = VarState::ReadPending(dst_cid);
+                            None
+                        }
+                        VarState::ReadPending(_) => {
+                            /* Already register nothing to do */
+                            None
+                        }
+                        VarState::Received(payload) => {
+                            // Value ready but not retrieved yet
+                            // Update state and register associated dma req
+                            *state = VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+
+                            // Allocate temporary value in the B2B_pool if required
+                            let dst_cid = match dst {
+                                Some(cid) => cid,
+                                None => b2b_pool.get_tagged(cur_iid),
+                            };
+
+                            // Construct DmaRequest
+                            let from = (
+                                payload.from_hid,
+                                payload
+                                    .slot
+                                    .expect("Ld_b2b required notify with associated data"),
+                            );
+                            let to = (hpu_asm::NodeId(config.node_id), dst_cid);
+
+                            Some((mode.clone(), from, to))
+                        }
+                        VarState::DmaPending(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                        VarState::Resolved(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                    }
+                }
+                /// Handle implicit load based on src operands position
+                VarMode::ArgSrc { var, blk } => {
+                    let state = arg_store.src_mut(var, blk);
+
+                    let var_iid = arg_store.src_iid(var, blk);
+                    let var_hid = arg_store.src_hid(var, blk);
+                    let var_cid = arg_store.src_cid(var, blk);
+
+                    match state {
+                        VarState::None => {
+                            if iop_state.is_done(var_iid) {
+                                // Check if present in the cache
+                                if Some(hit) = arg_cache.try_hit(var_iid, var_hid, vac_cid) {
+                                    // Value present in the cache, update internal state only
+                                    *state = VarState::Resolved(hit);
+                                    None
+                                } else {
+                                    // Value ready but not retrieved yet
+                                    // Update state and register associated dma req
+                                    *state = VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+
+                                    // Allocate temporary value in the B2B_pool if required
+                                    let dst_cid = match dst {
+                                        Some(cid) => cid,
+                                        None => b2b_pool.get_tagged(cur_iid),
+                                    };
+                                    // Construct DmaRequest
+                                    let from = (
+                                        var_hid,
+                                        var_cid
+                                    );
+                                    let to = (hpu_asm::NodeId(config.node_id), dst_cid);
+
+                                    Some((mode.clone(), from, to))
+                                }
+                            } else {
+                                // Value no ready
+                                *state = VarState::ReadPending(dst_cid);
+                                None
+                            }
+                        }
+                        VarState::ReadPending(_) => {
+                            /* Already register nothing to do */
+                            None
+                        }
+                        VarState::DmaPending(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                        VarState::Resolved(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                        VarState::Received(_) => {
+                            panic!("Invalid VarState for ArgSrc");
+                        }
+                    }
+                },
+                /// Handle implicit load based on destination generation
+                /// I.e. Current node own the slot but distant node generate the value
+                VarMode::ArgDst { var, blk } => {
+                    todo!("Handle this properly");
+                    let state = arg_store.dst_mut(var, blk);
+
+                    assert_eq!(arg_store.src_hid(var, blk), hpu_asm::NodeId(config.node_id), "ArgDst mechanisms must be used to retrieved owned operands only");
+                    let var_iid = arg_store.src_iid(var, blk);
+                    let var_hid = arg_store.src_hid(var, blk);
+                    let var_cid = arg_store.src_cid(var, blk);
+
+                    match state {
+                        VarState::None => {
+                            if iop_state.is_done(var_iid) {
+                                // Check if present in the cache
+                                if Some(hit) = arg_cache.try_hit(var_iid, var_hid, vac_cid) {
+                                    // Value present in the cache, update internal state only
+                                    *state = VarState::Resolved(hit);
+                                    None
+                                } else {
+                                    // Value ready but not retrieved yet
+                                    // Update state and register associated dma req
+                                    *state = VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+
+                                    // Allocate temporary value in the B2B_pool if required
+                                    let dst_cid = match dst {
+                                        Some(cid) => cid,
+                                        None => b2b_pool.get_tagged(cur_iid),
+                                    };
+                                    // Construct DmaRequest
+                                    let from = (
+                                        var_hid,
+                                        var_cid
+                                    );
+                                    let to = (hpu_asm::NodeId(config.node_id), dst_cid);
+
+                                    Some((mode.clone(), from, to))
+                                }
+                            } else {
+                                // Value no ready
+                                *state = VarState::ReadPending(dst_cid);
+                                None
+                            }
+                        }
+                        VarState::ReadPending(_) => {
+                            /* Already register nothing to do */
+                            None
+                        }
+                        VarState::DmaPending(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                        VarState::Resolved(_) => {
+                            /* Do Nothing */
+                            None
+                        }
+                        VarState::Received(_) => {
+                            panic!("Invalid VarState for ArgSrc");
+                        }
+                    }
+                                },
+            }
+        };
+
+
+            let state = match var_mode {
+                VarMode::User { iid, flag } => &mut notify_store[&(iid, flag)],
+                VarMode::ArgSrc { var, blk } => arg_store.src_mut(var, blk),
+                VarMode::ArgDst { var, blk } => arg_store.dst_mut(var, blk),
+            };
 
             match state {
-                NotifyState::None => {
-                    if let UcoreHash::Ucore { iid, flag } = hash
+                VarState::None => {
+                    if let UcoreHash::Ucore { iid, flag } = var_mode
                         && iid == hpu_asm::SW_IOP_ID
                     {
                         // Value generated by Sw and already uploaded in memory
@@ -1145,44 +1572,42 @@ impl UCore {
                         // Allocate temporary value in the B2B_pool if required
                         let dst_cid = match dst {
                             Some(cid) => cid,
-                            None => inner.b2b_pool.get_tagged(iid),
+                            None => b2b_pool.get_tagged(iid),
                         };
 
-                        *(&mut inner.notify_store[&hash]) =
-                            NotifyState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+                        *state = VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
                         Some((ucore_pld, dst_cid))
                     } else {
                         // Allocate temporary value in the B2B_pool if required
                         let dst_cid = match dst {
                             Some(cid) => cid,
-                            None => inner.b2b_pool.get_tagged(cur_iid),
+                            None => b2b_pool.get_tagged(cur_iid),
                         };
-                        *(&mut inner.notify_store[&hash]) = NotifyState::ReadPending(dst_cid);
+                        *state = VarState::ReadPending(dst_cid);
                         None
                     }
                 }
-                NotifyState::ReadPending(_) => {
+                VarState::ReadPending(_) => {
                     /* Already register nothing to do */
                     None
                 }
-                NotifyState::Received(payload) => {
+                VarState::Received(payload) => {
                     // Value ready but not retrieved yet
                     // Allocate temporary value in the B2B_pool if required
                     let dst_cid = match dst {
                         Some(cid) => cid,
-                        None => inner.b2b_pool.get_tagged(cur_iid),
+                        None => b2b_pool.get_tagged(cur_iid),
                     };
                     let pld = payload.clone();
 
-                    *(&mut inner.notify_store[&hash]) =
-                        NotifyState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+                    *state = VarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
                     Some((pld, dst_cid))
                 }
-                NotifyState::DmaPending(_) => {
+                VarState::DmaPending(_) => {
                     /* Do Nothing */
                     None
                 }
-                NotifyState::Resolved(_) => {
+                VarState::Resolved(_) => {
                     /* Do Nothing */
                     None
                 }
@@ -1191,30 +1616,26 @@ impl UCore {
 
         if let Some((pld, cid)) = dma_req {
             let hid = self.inner.lock().unwrap().config.node_id;
-            self.start_dma(hid, hash, pld, cid).await;
+            self.start_dma(hid, var_mode, pld, cid).await;
         }
     }
 
     async fn start_dma(
         &self,
-        from_hid: u8,
-        hash: UcoreHash,
-        payload: hpu_asm::UcorePayload,
-        dst_cid: hpu_asm::CtId,
+        mode: VarMode,
+        from: (hpu_asm::NodeId, hpu_asm::CtId),
+        to: (hpu_asm::NodeId, hpu_asm::CtId),
     ) {
-        log!(|self| log::Category::Own, log::Verbosity::Debug => hash, payload, dst_cid => "Dma registered");
+        log!(|self| log::Category::Own, log::Verbosity::Debug => mode, from, to => "Dma registered");
+        let (from_id, from_cid) = from;
+        let (to_id, to_cid) = to;
 
-        let src_addr = self.cid_to_addr(payload.slot.expect("LD_B2B required slot information"));
-        let dst_addr = self.cid_to_addr(dst_cid);
+        let src_addr = self.cid_to_addr(from_cid);
+        let dst_addr = self.cid_to_addr(to_cid);
 
         let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter())
             .map(|(src, dst)| {
-                DmaBus::new_wrapped(
-                    (payload.from_hid.0, src),
-                    (from_hid, dst),
-                    self.ct_pc_pattern(),
-                    None,
-                )
+                DmaBus::new_wrapped((from_hid, src), (to_hid, dst), self.ct_pc_pattern(), None)
             })
             .collect::<Vec<_>>();
         log!(|self| log::Category::Own, log::Verbosity::Debug => dma_req => "Build Dma requests");
@@ -1230,7 +1651,7 @@ impl UCore {
 
         // Register req for correct resp handling
         let mut irq_dma_ctx = self.irq_dma_ctx.lock().unwrap();
-        irq_dma_ctx.pdg_req.push_back((hash, dst_cid));
+        irq_dma_ctx.pdg_req.push_back((mode, to_cid));
     }
 
     /// Issue all dst load order belonging to `for_iid`.
@@ -1319,51 +1740,49 @@ impl UCore {
         &self,
         node_id: hpu_asm::NodeId,
         iid: hpu_asm::IOpId,
+        iop_nodes: u8,
     ) -> Result<(), anyhow::Error> {
+        // Flush dst_notify queue
+        self.flush_dst_notifyq(iid).await
+            .expect("Error while flush Dst Notify queue");
+
+        // Load all external generated dst that we own
+        self.ld_owned_dst(iid).await.expect("Error while loading owned dst generated by external node");
+
         // Flush deferred load queue
         self.flush_dst_ldq(iid)
             .await
             .expect("Error while flush Dst Store queue");
 
-        // Notify Other HpuNode of dst availability
-        // TODO replace with iop done notify to reduce notify bandwidth
-        // let notify_order = iop
-        //     .dst()
-        //     .iter()
-        //     .filter(|op| op.props.pos == node_id)
-        //     .flat_map(|op| {
-        //         log!(|self| log::Category::Own, log::Verbosity::Debug => op => "Dst avail notify");
-        //         let vec_len = op.props.vec_size.len();
-        //         let blk_len = op.props.block.len();
-        //         itertools::iproduct!(0..vec_len, 0..blk_len)
-        //             .map(|(v, b)| v * blk_len + b)
-        //             .flat_map(|bid| {
-        //                 let ucore_pld = hpu_asm::UcorePayload {
-        //                     mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
-        //                         pos: op.props.pos,
-        //                         slot: hpu_asm::CtId(op.addr.base_cid.0 + bid as u16),
-        //                     }),
-        //                     slot: None,
-        //                     from_hid: node_id,
-        //                     iid: op.props.iid,
-        //                 };
+        // Notify Other HpuNode of IOpEnd
+        // This is usefull to check data availability for future IOp without cluttering
+        // the ctrl communication channnel
+        // => Notify All node that 1 actor over N has finished it's work
+        let notify_order = self
+            .params
+            .cluster_nodes
+            .iter()
+            .filter(|n| **n != node_id.0)
+            .map(|n| {
+                let ucore_pld = hpu_asm::UcorePayload {
+                    mode: hpu_asm::UcorePayloadMode::IOpDone(iop_nodes),
+                    slot: None,
+                    from_hid: node_id,
+                    iid,
+                };
+                Network::new_wrapped(node_id.0, *n, ucore_pld, None)
+            })
+            .collect::<Vec<_>>();
+        self.ctrl
+            .tx()
+            .send_pkt_burst(notify_order)
+            .await
+            .expect("Error while notifying cluster");
 
-        //                 self.params
-        //                     .cluster_nodes
-        //                     .iter()
-        //                     .filter(|n| **n != node_id.0)
-        //                     .map(|n| Network::new_wrapped(node_id.0, *n, ucore_pld, None))
-        //                     .collect::<Vec<_>>()
-        //             })
-        //             .collect::<Vec<_>>()
-        //     })
-        //     .collect::<Vec<_>>();
-
-        // self.ctrl
-        //     .tx()
-        //     .send_pkt_burst(notify_order)
-        //     .await
-        //     .expect("Error while notifying cluster");
+        // Update internal state
+        let mut inner = self.inner.lock().unwrap();
+        // register ack in local entry
+        inner.iop_state.node_ack(iid, iop_nodes);
 
         // Release b2b_pool slot that belong to current iop
         self.inner.lock().unwrap().b2b_pool.release_tagged(iid);
