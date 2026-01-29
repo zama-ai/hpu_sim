@@ -68,11 +68,11 @@ enum UserVarState {
 }
 
 /// Struture able to store user synchronisation state
-struct UserStore([UserVarState; MAX_IID * MAX_USER_EVENTS]);
+struct UserStore(Vec<UserVarState>);
 
 impl Default for UserStore {
     fn default() -> Self {
-        Self([UserVarState::None; MAX_IID * MAX_USER_EVENTS])
+        Self(vec![UserVarState::None; MAX_IID * MAX_USER_EVENTS])
     }
 }
 
@@ -114,15 +114,15 @@ enum DstVarState {
 }
 /// Struture able to store DstArg synchronisation state
 struct DstArgStore {
-    owner: [hpu_asm::NodeId; MAX_IID * MAX_DST_VARS],
-    store: [DstVarState; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
+    owner: Vec<hpu_asm::NodeId>,
+    store: Vec<DstVarState>,
 }
 
 impl Default for DstArgStore {
     fn default() -> Self {
         Self {
-            owner: [hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_USER_EVENTS],
-            store: [DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
+            owner: vec![hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_USER_EVENTS],
+            store: vec![DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
         }
     }
 }
@@ -242,14 +242,14 @@ enum SrcVarState {
 #[derive(Debug, Clone)]
 struct SrcArgStore {
     cur_iop: Option<hpu_asm::IOp>,
-    store: [SrcVarState; MAX_SRC_VARS * MAX_VARS_BLK],
+    store: Vec<SrcVarState>,
 }
 
 impl Default for SrcArgStore {
     fn default() -> Self {
         Self {
             cur_iop: Default::default(),
-            store: [SrcVarState::None; MAX_SRC_VARS * MAX_VARS_BLK],
+            store: vec![SrcVarState::None; MAX_SRC_VARS * MAX_VARS_BLK],
         }
     }
 }
