@@ -107,21 +107,28 @@ impl std::ops::IndexMut<&(hpu_asm::IOpId, hpu_asm::UserFlag)> for UserStore {
 // Destination synchronisation ========================================================================================
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DstVarState {
+    None,              // Slot unused with current configured IOp
     WaitNotify,        // Event not received but read is already pending
     DmaPending(usize), // Event received and associated dma request already issued
     Resolved,          // Event received and locally resolved in associated mem_id
 }
 /// Struture able to store DstArg synchronisation state
-struct DstArgStore([DstVarState; MAX_IID * MAX_USER_EVENTS]);
+struct DstArgStore {
+    owner: [hpu_asm::NodeId; MAX_IID * MAX_DST_VARS],
+    store: [DstVarState; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
+}
 
 impl Default for DstArgStore {
     fn default() -> Self {
-        Self([DstVarState::WaitNotify; MAX_IID * MAX_USER_EVENTS])
+        Self {
+            owner: [hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_USER_EVENTS],
+            store: [DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
+        }
     }
 }
 
 impl DstArgStore {
-    fn index_from_tuple(iid: hpu_asm::IOpId, var: u8, blk: u8) -> usize {
+    fn var_index_from_tuple(iid: hpu_asm::IOpId, var: u8) -> usize {
         assert!(
             iid.0 as usize <= MAX_IID,
             "Error: looking for event that belong to invalid IOpId"
@@ -130,11 +137,67 @@ impl DstArgStore {
             var as usize <= MAX_DST_VARS,
             "Error: looking for dst variable outside of buffer range"
         );
+
+        (iid.0 as usize * MAX_DST_VARS) + var as usize
+    }
+
+    fn blk_index_from_tuple(iid: hpu_asm::IOpId, var: u8, blk: u8) -> usize {
+        let var_idx = Self::var_index_from_tuple(iid, var);
         assert!(
             blk as usize <= MAX_VARS_BLK,
             "Error: looking for blk outside of buffer range"
         );
-        (((iid.0 as usize * MAX_DST_VARS) + var as usize) * MAX_VARS_BLK) + blk as usize
+
+        (var_idx * MAX_VARS_BLK) + blk as usize
+    }
+
+    /// Reset iop state
+    fn reset_iop(&mut self, iid: hpu_asm::IOpId) {
+        for v in 0..MAX_DST_VARS {
+            let idx = Self::var_index_from_tuple(iid, v as u8);
+            self.owner[idx] = hpu_asm::NodeId(u8::max_value());
+
+            for b in 0..MAX_VARS_BLK {
+                let idx = Self::blk_index_from_tuple(iid, v as u8, b as u8);
+                self.store[idx] = DstVarState::WaitNotify;
+            }
+        }
+    }
+
+    /// Init iop state
+    /// Based on IOp properties discard unused slot
+    fn init_iop(&mut self, iop: &hpu_asm::IOp) {
+        let iid = iop.get_iid();
+        for (idx, var) in iop.dst().iter().enumerate() {
+            let var_idx = Self::var_index_from_tuple(iid, idx as u8);
+            self.owner[var_idx] = var.props.pos;
+
+            // Discard unused slot
+            for b in var.props.block.len()..MAX_VARS_BLK as u8 {
+                let blk_idx = Self::blk_index_from_tuple(iid, idx as u8, b);
+                self.store[blk_idx] = DstVarState::None;
+            }
+        }
+    }
+
+    /// return position of all blk that belong to current hpu
+    fn get_owned(&self, iid: hpu_asm::IOpId, hid: hpu_asm::NodeId) -> Vec<(u8, u8)> {
+        let mut owned = Vec::new();
+        for v in 0..MAX_DST_VARS {
+            let idx = Self::var_index_from_tuple(iid, v as u8);
+            if hid == self.owner[idx] {
+                for b in 0..MAX_VARS_BLK {
+                    let idx = Self::blk_index_from_tuple(iid, v as u8, b as u8);
+                    if DstVarState::None != self.store[idx] {
+                        owned.push((v as u8, b as u8))
+                    } else {
+                        // reach end of used blk
+                        break;
+                    }
+                }
+            }
+        }
+        owned
     }
 }
 
@@ -142,23 +205,26 @@ impl std::ops::Index<&(hpu_asm::IOpId, u8, u8)> for DstArgStore {
     type Output = DstVarState;
 
     fn index(&self, index: &(hpu_asm::IOpId, u8, u8)) -> &Self::Output {
-        &self.0[Self::index_from_tuple(index.0, index.1, index.2)]
+        &self.store[Self::blk_index_from_tuple(index.0, index.1, index.2)]
     }
 }
 
 impl std::ops::IndexMut<&(hpu_asm::IOpId, u8, u8)> for DstArgStore {
     fn index_mut(&mut self, index: &(hpu_asm::IOpId, u8, u8)) -> &mut Self::Output {
-        &mut self.0[Self::index_from_tuple(index.0, index.1, index.2)]
+        &mut self.store[Self::blk_index_from_tuple(index.0, index.1, index.2)]
     }
 }
 
 /// Keep track of destination slot generated during current IOp context
 #[derive(Debug)]
 struct DstNotifyOrder {
-    iid: hpu_asm::IOpId,
+    // destination info
     var: u8,
     blk: u8,
-    cid: hpu_asm::CtId,
+    trgt_cid: hpu_asm::CtId,
+    trgt_hid: hpu_asm::NodeId,
+    // local info
+    local_cid: hpu_asm::CtId,
 }
 
 // Source synchronisation =============================================================================================
@@ -689,6 +755,7 @@ impl UCore {
                     // And register new entry in DstNotify
                     inner.local_store.reset(iop.clone());
                     inner.dst_notifyq.push_back(Vec::new());
+                    inner.dst_store.init_iop(&iop);
 
                     inner.cur_iid = iop.get_iid();
                     inner.iop_pdg.push_back(iop.clone());
@@ -835,31 +902,81 @@ impl UCore {
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
             let node_id = inner.config.node_id;
-            let state = match var_mode {
-                VarMode::User { iid, flag } => &mut inner.user_store[&(*iid, *flag)],
-                VarMode::ArgSrc { var, blk } => inner.local_store.src_mut(*var, *blk),
-                VarMode::ArgDst { var, blk } => inner.local_store.dst_mut(*var, *blk),
-            };
-            match state {
-                UserVarState::DmaPending(pdg_cnt) => {
-                    println!("@{node_id}[{var_mode:?}] => Current pending_cnt {pdg_cnt}");
-                    if *pdg_cnt == 1 {
-                        // All pem_pc slice where retrieved remove from pending request
-                        // and update state
-                        let (mode, cid) = irq_dma_ctx
-                            .pdg_req
-                            .pop_front()
-                            .expect("Received dma_resp without pending request");
-                        *state = UserVarState::Resolved(cid);
 
-                        // Notify to wake up pending task
-                        event::Event::triggered(&forge_event_name!(|self| "resolved_evt"), None);
-                        println!("@{node_id}[{mode:?}] event triggered");
-                    } else {
-                        *pdg_cnt -= 1;
+            // Extract global state based on request sources
+            let notify_evt = match var_mode {
+                VarMode::User { iid, flag } => {
+                    let state = &mut inner.user_store[&(*iid, *flag)];
+                    match state {
+                        UserVarState::DmaPending(pdg_cnt) => {
+                            // Update irq_dma context
+                            if *pdg_cnt == 1 {
+                                // All pem_pc slice where retrieved remove from pending request
+                                // and update state
+                                let (mode, cid) = irq_dma_ctx
+                                    .pdg_req
+                                    .pop_front()
+                                    .expect("Received dma_resp without pending request");
+                                *state = UserVarState::Resolved(cid);
+
+                                true
+                            } else {
+                                *pdg_cnt -= 1;
+                                false
+                            }
+                        }
+                        _ => panic!("Received user dma_resp on invalid state {state:?}"),
                     }
                 }
-                _ => panic!("Received dma_resp for entry in invalid state {state:?}"),
+                VarMode::ArgSrc { var, blk } => {
+                    let state = inner.local_store.src_mut(*var, *blk);
+                    match state {
+                        SrcVarState::DmaPending(pdg_cnt) => {
+                            // Update irq_dma context
+                            if *pdg_cnt == 1 {
+                                // All pem_pc slice where retrieved remove from pending request
+                                // and update state
+                                let (mode, cid) = irq_dma_ctx
+                                    .pdg_req
+                                    .pop_front()
+                                    .expect("Received dma_resp without pending request");
+                                *state = SrcVarState::Resolved(cid);
+
+                                true
+                            } else {
+                                *pdg_cnt -= 1;
+                                false
+                            }
+                        }
+                        _ => panic!("Received src dma_resp on invalid state {state:?}"),
+                    }
+                }
+                VarMode::ArgDst { iid, var, blk } => {
+                    let state = &mut inner.dst_store[&(*iid, *var, *blk)];
+                    match state {
+                        DstVarState::DmaPending(pdg_cnt) => {
+                            // Update irq_dma context
+                            if *pdg_cnt == 1 {
+                                // All pem_pc slice where retrieved remove from pending request
+                                // and update state
+                                let (mode, cid) = irq_dma_ctx
+                                    .pdg_req
+                                    .pop_front()
+                                    .expect("Received dma_resp without pending request");
+                                *state = DstVarState::Resolved;
+
+                                true
+                            } else {
+                                *pdg_cnt -= 1;
+                                false
+                            }
+                        }
+                        _ => panic!("Receined dst dma_resp on invalid state {state:?}"),
+                    }
+                }
+            };
+            if notify_evt {
+                event::Event::triggered(&forge_event_name!(|self| "resolved_evt"), None);
             }
         }
     }
@@ -897,34 +1014,35 @@ impl UCore {
 
             let dma_req = {
                 let mut inner = self.inner.lock().unwrap();
+                let node_id = inner.config.node_id;
                 let mut dma_req = Vec::new();
 
                 match mode {
                     hpu_asm::UcorePayloadMode::Ucore(flag) => {
-                        let state = &mut inner.dst_store[&(iid, flag)];
+                        let state = &mut inner.dst_store[&(iid, flag.tid, flag.bid)];
                         match state {
-                            UserVarState::None => {
-                                // Simply update state
-                                *state = UserVarState::Received(ucore_pld);
-                            }
-                            UserVarState::ReadPending(cid) => {
+                            DstVarState::WaitNotify => {
                                 // Update state and register associated dma req
-                                *state = UserVarState::DmaPending(
+                                *state = DstVarState::DmaPending(
                                     self.params.rtl_params.pc_params.pem_pc,
                                 );
 
-                                let var_mode = VarMode::User { iid, flag };
+                                let var_mode = VarMode::ArgDst {
+                                    iid,
+                                    var: flag.tid,
+                                    blk: flag.bid,
+                                };
                                 let from = (
                                     from_hid.clone(),
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
-                                let to = (hpu_asm::NodeId(inner.config.node_id), *cid);
+                                let to = (hpu_asm::NodeId(inner.config.node_id), flag.trgt_cid);
 
                                 dma_req.push((var_mode, from, to))
                             }
                             _ => {
                                 panic!(
-                                    "Ucore {}: Received duplicated event @{iid}::{flag:?} [{mode:?}, {from_hid:?}, {slot:?}]",
+                                    "Ucore {}: Received duplicated dst event @{iid}::{flag:?} [{mode:?}, {from_hid:?}, {slot:?}]",
                                     inner.config.node_id
                                 );
                             }
@@ -938,19 +1056,20 @@ impl UCore {
                                 *state = UserVarState::Received(ucore_pld);
                             }
                             UserVarState::ReadPending(cid) => {
-                                // Update state and register associated dma req
-                                *state = UserVarState::DmaPending(
-                                    self.params.rtl_params.pc_params.pem_pc,
-                                );
-
+                                // Issue dma request
                                 let var_mode = VarMode::User { iid, flag };
                                 let from = (
                                     from_hid.clone(),
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
-                                let to = (hpu_asm::NodeId(inner.config.node_id), *cid);
+                                let to = (hpu_asm::NodeId(node_id), *cid);
 
-                                dma_req.push((var_mode, from, to))
+                                dma_req.push((var_mode, from, to));
+
+                                // Update state and register associated dma req
+                                *state = UserVarState::DmaPending(
+                                    self.params.rtl_params.pc_params.pem_pc,
+                                );
                             }
                             _ => {
                                 panic!(
@@ -971,20 +1090,17 @@ impl UCore {
                                 .idx_of(&iid)
                                 .into_iter()
                                 .filter(|(var, blk)| {
-                                    matches!(
-                                        arg_store.src(*var, *blk),
-                                        UserVarState::ReadPending(_)
-                                    )
+                                    matches!(arg_store.src(*var, *blk), SrcVarState::ReadPending(_))
                                 })
                                 .collect::<Vec<_>>();
 
                             for (var, blk) in pdg_ld_idx {
                                 let state = inner.local_store.src_mut(var, blk);
                                 match state {
-                                    UserVarState::ReadPending(cid) => {
+                                    SrcVarState::ReadPending(cid) => {
                                         let cid = *cid;
                                         // Update state
-                                        *state = UserVarState::DmaPending(
+                                        *state = SrcVarState::DmaPending(
                                             self.params.rtl_params.pc_params.pem_pc,
                                         );
 
@@ -1170,6 +1286,8 @@ impl UCore {
         iop: &hpu_asm::IOp,
         dops: &[hpu_asm::DOp],
     ) -> Result<(), anyhow::Error> {
+        let iop_id = iop.get_iid();
+
         for dop in dops {
             // Execute DOp directly or [patch] & deferred to Hpu
             let deferred_dop = match dop {
@@ -1285,55 +1403,29 @@ impl UCore {
 
                                     let op_cid = if operand.props.pos.0 == inner.config.node_id {
                                         // Local access -> Usual patching
+                                        // Update dst_store accordingly (i.e. toggle to receive to store the fact that value is locally generated)
                                         // Also removed associated DstLdOrder in the queue
-                                        if let Some(i) = inner
-                                            .dst_ldq
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_i, x)| {
-                                                x.iid == inner.cur_iid
-                                                    && x.operand == operand
-                                                    && x.cid == cid
-                                            })
-                                            .map(|(i, _x)| i)
-                                            .next()
-                                        {
-                                            let _ = inner.dst_ldq.remove(i);
-                                        };
+                                        inner.dst_store[&(iop_id, tid, bid)] =
+                                            DstVarState::Resolved;
                                         cid
                                     } else {
                                         // Remote access
-                                        // Create associated DstLdOrder in the queue if it doesn't exist
-                                        match inner.dst_ldq.iter().enumerate().find(|(_i, x)| {
-                                            x.iid == inner.cur_iid
-                                                && x.operand == operand
-                                                && x.cid == cid
-                                        }) {
-                                            Some((_pos, order)) => {
-                                                assert!(
-                                                    matches!(order.action, LdAction::Notify(_)),
-                                                    "Clash with alread present order {order:?}[{:?}",
-                                                    inner.dst_ldq
-                                                );
-                                                order.cid
-                                            }
-                                            None => {
-                                                // Allocate temporary value in the B2B_pool
-                                                let tmp_cid =
-                                                    inner.b2b_pool.get_tagged(iop.get_iid());
+                                        // Register in DstNotifyQ for later notify
+                                        // TODO Check that not already present or enforce single access by compiler rules ?!
+                                        // Allocate temporary value in the B2B_pool
+                                        let local_cid = inner.b2b_pool.get_tagged(iop.get_iid());
 
-                                                // Create associated entry.
-                                                // NB: only occured for remote access case (i.e. no direct deletion afterward)
-                                                let order = DstLdOrder {
-                                                    iid: inner.cur_iid,
-                                                    operand,
-                                                    cid,
-                                                    action: LdAction::Notify(tmp_cid),
-                                                };
-                                                inner.dst_ldq.push(order);
-                                                tmp_cid
-                                            }
-                                        }
+                                        // Create associated entry.
+                                        // NB: only occured for remote access case (i.e. no direct deletion afterward)
+                                        let order = DstNotifyOrder {
+                                            var: tid,
+                                            blk: bid,
+                                            trgt_hid: operand.props.pos,
+                                            trgt_cid: cid,
+                                            local_cid,
+                                        };
+                                        inner.dst_notifyq.back_mut().expect("notifyq must have been register during context init").push(order);
+                                        local_cid
                                     };
 
                                     hpu_asm::MemId::Addr(op_cid)
@@ -1454,14 +1546,14 @@ impl UCore {
                         let state = inner.local_store.src(*var, *blk);
                         matches!(state, SrcVarState::Resolved(_))
                     }
-                    VarMode::ArgDst { var, blk } => {
-                        let state = inner.local_store.dst(*var, *blk);
-                        matches!(state, DstVarState::Resolved())
+                    VarMode::ArgDst { iid, var, blk } => {
+                        let state = inner.dst_store[&(*iid, *var, *blk)];
+                        matches!(state, DstVarState::Resolved)
                     }
                 }
             };
 
-            if wait_read {
+            if wait_ready {
                 break;
             } else {
                 event::Event::wait(&forge_event_name!(|self| "resolved_evt")).await;
@@ -1491,7 +1583,7 @@ impl UCore {
             log!(|self| log::Category::Own, log::Verbosity::Debug => var_mode, dst => "Register B2b load");
 
             match var_mode {
-                /// Handle explicit DOp transfer inside an IOp
+                // Handle explicit DOp transfer inside an IOp
                 VarMode::User { iid, flag } => {
                     let state = &mut user_store[&(iid, flag)];
 
@@ -1512,10 +1604,7 @@ impl UCore {
                         }
                         UserVarState::Received(payload) => {
                             // Value ready but not retrieved yet
-                            // Update state and register associated dma req
-                            *state =
-                                UserVarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
-
+                            // Register associated dma req
                             // Allocate temporary value in the B2B_pool if required
                             let dst_cid = match dst {
                                 Some(cid) => cid,
@@ -1531,6 +1620,10 @@ impl UCore {
                             );
                             let to = (hpu_asm::NodeId(config.node_id), dst_cid);
 
+                            // Update state
+                            *state =
+                                UserVarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
+
                             Some((var_mode.clone(), from, to))
                         }
                         UserVarState::DmaPending(_) => {
@@ -1543,19 +1636,19 @@ impl UCore {
                         }
                     }
                 }
-                /// Handle implicit load based on src operands position
+                // Handle implicit load based on src operands position
                 VarMode::ArgSrc { var, blk } => {
-                    let state = arg_store.src_mut(var, blk);
-
                     let var_iid = arg_store.src_iid(var, blk);
                     let var_hid = arg_store.src_hid(var, blk);
                     let var_cid = arg_store.src_cid(var, blk);
+
+                    let state = arg_store.src_mut(var, blk);
 
                     match state {
                         SrcVarState::None => {
                             if iop_state.is_done(var_iid) {
                                 // Check if present in the cache
-                                if Some(hit) = arg_cache.try_hit(var_iid, var_hid, vac_cid) {
+                                if let Some(hit) = arg_cache.try_hit(var_iid, var_hid, var_cid) {
                                     // Value present in the cache, update internal state only
                                     *state = SrcVarState::Resolved(hit);
                                     None
@@ -1578,7 +1671,13 @@ impl UCore {
                                     Some((var_mode.clone(), from, to))
                                 }
                             } else {
-                                // Value no ready
+                                // Value not ready
+                                // Allocate temporary value in the B2B_pool if required
+                                let dst_cid = match dst {
+                                    Some(cid) => cid,
+                                    None => b2b_pool.get_tagged(cur_iid),
+                                };
+
                                 *state = SrcVarState::ReadPending(dst_cid);
                                 None
                             }
@@ -1595,13 +1694,10 @@ impl UCore {
                             /* Do Nothing */
                             None
                         }
-                        SrcVarState::Received(_) => {
-                            panic!("Invalid VarState for ArgSrc");
-                        }
                     }
                 }
-                /// Handle implicit load based on destination generation
-                /// I.e. Current node own the slot but distant node generate the value
+                // Handle implicit load based on destination generation
+                // I.e. Current node own the slot but distant node generate the value
                 VarMode::ArgDst { .. } => {
                     todo!("Handle this properly");
                 }
@@ -1610,7 +1706,7 @@ impl UCore {
 
         if let Some((var_mode, from, to)) = dma_req {
             let hid = self.inner.lock().unwrap().config.node_id;
-            self.start_dma(hid, var_mode, pld, cid).await;
+            self.start_dma(var_mode, from, to).await;
         }
     }
 
@@ -1621,15 +1717,20 @@ impl UCore {
         to: (hpu_asm::NodeId, hpu_asm::CtId),
     ) {
         log!(|self| log::Category::Own, log::Verbosity::Debug => mode, from, to => "Dma registered");
-        let (from_id, from_cid) = from;
-        let (to_id, to_cid) = to;
+        let (from_hid, from_cid) = from;
+        let (to_hid, to_cid) = to;
 
         let src_addr = self.cid_to_addr(from_cid);
         let dst_addr = self.cid_to_addr(to_cid);
 
         let dma_req = std::iter::zip(src_addr.into_iter(), dst_addr.into_iter())
             .map(|(src, dst)| {
-                DmaBus::new_wrapped((from_hid, src), (to_hid, dst), self.ct_pc_pattern(), None)
+                DmaBus::new_wrapped(
+                    (from_hid.0, src),
+                    (to_hid.0, dst),
+                    self.ct_pc_pattern(),
+                    None,
+                )
             })
             .collect::<Vec<_>>();
         log!(|self| log::Category::Own, log::Verbosity::Debug => dma_req => "Build Dma requests");
@@ -1648,79 +1749,69 @@ impl UCore {
         irq_dma_ctx.pdg_req.push_back((mode, to_cid));
     }
 
-    /// Issue all dst load order belonging to `for_iid`.
-    /// Kept other one in the queue
-    async fn flush_dst_ldq(&self, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
-        //1. Filter out all read request that belong to current iop
-        // Store back unmatch DstRdOrder in queue
-        let (hid, mut cur_ord) = {
+    /// Issue all dst notify order
+    async fn flush_dst_notifyq(&self, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
+        // Retrieved associated notify order
+        let (notify_order, hid) = {
             let mut inner = self.inner.lock().unwrap();
-            let remains_elem = inner
-                .dst_ldq
-                .iter_mut()
-                .partition_in_place(|e| e.iid != for_iid);
-            (inner.config.node_id, inner.dst_ldq.split_off(remains_elem))
-        };
-        log!(|self| log::Category::Own, log::Verbosity::Debug => cur_ord => "Load queue for current IOp");
+            let hid = inner.config.node_id;
 
-        // 2. Execute DstLdOrder
-        let (notify_ord, read_ord) = {
-            let rd_elem = cur_ord.iter_mut().partition_in_place(|e| match e.action {
-                LdAction::Notify(_) => false,
-                LdAction::Read => true,
-            });
-            (cur_ord.split_off(rd_elem), cur_ord)
+            let order = inner
+                .dst_notifyq
+                .pop_front()
+                .expect("notifyq must have been register during context init");
+            (order, hid)
         };
 
         // 2.a Execute Notify
-        let notify_order = notify_ord
-            .iter()
-            .map(|order| {
-                let slot = match order.action {
-                    LdAction::Notify(ct_id) => ct_id,
-                    LdAction::Read => panic!("Check cur_ord filtering"),
-                };
-                let ucore_pld = hpu_asm::UcorePayload {
-                    mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
-                        pos: order.operand.props.pos,
-                        slot: order.cid,
-                    }),
-                    slot: Some(slot),
-                    from_hid: hpu_asm::NodeId(hid),
-                    iid: order.iid,
-                };
+        let notify_pkt = notify_order
+            .into_iter()
+            .map(
+                |DstNotifyOrder {
+                     var,
+                     blk,
+                     trgt_cid,
+                     trgt_hid,
+                     local_cid,
+                 }| {
+                    let ucore_pld = hpu_asm::UcorePayload {
+                        mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
+                            tid: var,
+                            bid: blk,
+                            trgt_cid,
+                        }),
+                        slot: Some(local_cid),
+                        from_hid: hpu_asm::NodeId(hid),
+                        iid: for_iid,
+                    };
 
-                // Notify owner HpuNode
-                Network::new_wrapped(hid, order.operand.props.pos.0, ucore_pld, None)
-            })
+                    // Notify owner HpuNode
+                    Network::new_wrapped(hid, trgt_hid.0, ucore_pld, None)
+                },
+            )
             .collect::<Vec<_>>();
 
-        self.ctrl.tx().send_pkt_burst(notify_order).await?;
+        self.ctrl.tx().send_pkt_burst(notify_pkt).await?;
+        Ok(())
+    }
 
-        // 2.b Execute Remote load
-        let hash_cid_v = read_ord
-            .iter()
-            .map(|order| {
-                (
-                    UcoreHash::Ucore {
-                        iid: order.iid,
-                        flag: hpu_asm::UcoreFlag {
-                            pos: order.operand.props.pos, // TODO this could only be self no ?
-                            slot: order.cid,
-                        },
-                    },
-                    order.cid,
-                )
-            })
-            .collect::<Vec<_>>();
+    /// Wait for all local dst load to be resolved
+    async fn wait_owned_dst(&self, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
+        // Retrieved list of owned dst blok
+        let dst_blk = {
+            let inner = self.inner.lock().unwrap();
+            let hid = hpu_asm::NodeId(inner.config.node_id);
 
-        // Issue all requests
-        for (hash, cid) in hash_cid_v.iter() {
-            self.ld_b2b(hash.clone(), Some(*cid)).await;
-        }
-        // Wait for all requests
-        for (hash, _) in hash_cid_v.iter() {
-            self.wait_resolved(hash).await;
+            inner.dst_store.get_owned(for_iid, hid)
+        };
+
+        for (var, blk) in dst_blk {
+            let var_mode = VarMode::ArgDst {
+                iid: for_iid,
+                var,
+                blk,
+            };
+            self.wait_resolved(&var_mode).await;
         }
         Ok(())
     }
@@ -1741,15 +1832,10 @@ impl UCore {
             .await
             .expect("Error while flush Dst Notify queue");
 
-        // Load all external generated dst that we own
-        self.ld_owned_dst(iid)
+        // wait all external generated dst that we own
+        self.wait_owned_dst(iid)
             .await
-            .expect("Error while loading owned dst generated by external node");
-
-        // Flush deferred load queue
-        self.flush_dst_ldq(iid)
-            .await
-            .expect("Error while flush Dst Store queue");
+            .expect("Error while waiting owned dst generated by external node");
 
         // Notify Other HpuNode of IOpEnd
         // This is usefull to check data availability for future IOp without cluttering
@@ -1782,7 +1868,10 @@ impl UCore {
         inner.iop_state.node_ack(iid, iop_nodes);
 
         // Release b2b_pool slot that belong to current iop
-        self.inner.lock().unwrap().b2b_pool.release_tagged(iid);
+        inner.b2b_pool.release_tagged(iid);
+
+        // Clean dst store for next iteration
+        inner.dst_store.reset_iop(iid);
         Ok(())
     }
 
