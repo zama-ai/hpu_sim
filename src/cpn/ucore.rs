@@ -255,12 +255,6 @@ impl Default for SrcArgStore {
 }
 
 impl SrcArgStore {
-    fn new(iop: hpu_asm::IOp) -> Self {
-        let mut dflt = Self::default();
-        dflt.cur_iop = Some(iop);
-        dflt
-    }
-
     /// Reset internal state
     fn reset(&mut self, iop: hpu_asm::IOp) {
         (*self) = Default::default();
@@ -351,19 +345,19 @@ impl Default for ArgCache {
 impl ArgCache {
     fn try_hit(
         &self,
-        iid: hpu_asm::IOpId,
-        hpid: hpu_asm::NodeId,
-        cid: hpu_asm::CtId,
+        _iid: hpu_asm::IOpId,
+        _hpid: hpu_asm::NodeId,
+        _cid: hpu_asm::CtId,
     ) -> Option<hpu_asm::CtId> {
         // TODO do proper impl
         None
     }
     fn register_ct(
         &mut self,
-        iid: hpu_asm::IOpId,
-        hpid: hpu_asm::NodeId,
-        cid: hpu_asm::CtId,
-        local_cid: hpu_asm::CtId,
+        _iid: hpu_asm::IOpId,
+        _hpid: hpu_asm::NodeId,
+        _cid: hpu_asm::CtId,
+        _local_cid: hpu_asm::CtId,
     ) {
         // todo!()
     }
@@ -557,10 +551,6 @@ struct IrqAck {
 
 /// Internal structure used only by IrqNotify task
 #[derive(Debug, Default)]
-struct IrqNotify {}
-
-/// Internal structure used only by IrqNotify task
-#[derive(Debug, Default)]
 struct IrqDma {
     pdg_req: VecDeque<(VarMode, hpu_asm::CtId)>,
 }
@@ -595,7 +585,6 @@ pub struct UCore {
     inner: Mutex<UCoreInner>,
     irq_ack_ctx: Mutex<IrqAck>,
     irq_dma_ctx: Mutex<IrqDma>,
-    irq_notify_ctx: Mutex<IrqNotify>,
 }
 
 #[default_teardown]
@@ -634,7 +623,6 @@ impl UCore {
             inner: Mutex::new(inner),
             irq_ack_ctx: Mutex::new(Default::default()),
             irq_dma_ctx: Mutex::new(Default::default()),
-            irq_notify_ctx: Mutex::new(Default::default()),
             params,
             props,
         }
@@ -791,7 +779,7 @@ impl UCore {
     }
 
     /// This function modelize handler of hpu_core Ackq interrupt
-    async fn irq_ack(self: Arc<Self>) -> Result<(), anyhow::Error> {
+    async fn irq_ack(self: Arc<Self>) {
         loop {
             // Wait for hpu dop ack event
             let dop_sync = self
@@ -826,7 +814,8 @@ impl UCore {
                         ucore_pld,
                         None,
                     ))
-                    .await?;
+                    .await
+                    .expect("Issue with Ctrl xfer")
             } else {
                 // Probe associated iop properties
                 // Do not pop it to prevent irq_notify to be suspended (and prevent iop_teardown resolution)
@@ -903,7 +892,6 @@ impl UCore {
 
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
-            let node_id = inner.config.node_id;
 
             // Extract global state based on request sources
             let notify_evt = match var_mode {
@@ -915,7 +903,7 @@ impl UCore {
                             if *pdg_cnt == 1 {
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
-                                let (mode, cid) = irq_dma_ctx
+                                let (_mode, cid) = irq_dma_ctx
                                     .pdg_req
                                     .pop_front()
                                     .expect("Received dma_resp without pending request");
@@ -938,7 +926,7 @@ impl UCore {
                             if *pdg_cnt == 1 {
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
-                                let (mode, cid) = irq_dma_ctx
+                                let (_mode, cid) = irq_dma_ctx
                                     .pdg_req
                                     .pop_front()
                                     .expect("Received dma_resp without pending request");
@@ -961,7 +949,7 @@ impl UCore {
                             if *pdg_cnt == 1 {
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
-                                let (mode, cid) = irq_dma_ctx
+                                let (_mode, cid) = irq_dma_ctx
                                     .pdg_req
                                     .pop_front()
                                     .expect("Received dma_resp without pending request");
@@ -1707,7 +1695,6 @@ impl UCore {
         };
 
         if let Some((var_mode, from, to)) = dma_req {
-            let hid = self.inner.lock().unwrap().config.node_id;
             self.start_dma(var_mode, from, to).await;
         }
     }
