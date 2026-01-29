@@ -355,7 +355,8 @@ impl ArgCache {
         hpid: hpu_asm::NodeId,
         cid: hpu_asm::CtId,
     ) -> Option<hpu_asm::CtId> {
-        todo!()
+        // TODO do proper impl
+        None
     }
     fn register_ct(
         &mut self,
@@ -364,7 +365,7 @@ impl ArgCache {
         cid: hpu_asm::CtId,
         local_cid: hpu_asm::CtId,
     ) {
-        todo!()
+        // todo!()
     }
 }
 
@@ -748,7 +749,8 @@ impl UCore {
                     if inner.cur_iid >= iop.get_iid() {
                         // Flush internal state
                         inner.b2b_pool.release_all();
-                        todo!("Correctly reset local context and irq handler data");
+                        inner.user_store = Default::default();
+                        inner.dst_store = Default::default();
                     }
 
                     // Update ArgStore context
