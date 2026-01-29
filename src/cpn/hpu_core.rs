@@ -730,38 +730,41 @@ impl HpuCore {
         // Dump DOpPayload to trace
         trace!(|self| trace::Kind::Pipeline => dop);
 
-        if let hpu_asm::DOp::SYNC(_) = &dop.inner {
-            if self.params.sim_trace {
-                let mut inner = self.inner.lock().unwrap();
-                let HpuCoreInner {
-                    ref mut sim_model,
-                    ref mut sim_tracer,
-                    ..
-                } = *inner;
-                sim_model.report(
-                    hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
-                    sim_tracer,
+        if let hpu_asm::DOp::SYNC(op_impl) = &dop.inner {
+            // Skip report/context update on inner_sync
+            if !op_impl.0.is_inner_sync {
+                if self.params.sim_trace {
+                    let mut inner = self.inner.lock().unwrap();
+                    let HpuCoreInner {
+                        ref mut sim_model,
+                        ref mut sim_tracer,
+                        ..
+                    } = *inner;
+                    sim_model.report(
+                        hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                        sim_tracer,
+                    );
+                }
+
+                // Retrieved Current IOp context
+                let iop = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .iop_ctx
+                    .pop_front()
+                    .expect("Sync received without associated context");
+
+                // Push iop in stream for lifetime tracking
+                let iop_pkt = Packet::wrap_payload(
+                    iop,
+                    PacketOptions {
+                        timed: false,
+                        ..Default::default()
+                    },
                 );
+                self.hpu_ctx.tx().fwd_pkt(iop_pkt).await;
             }
-
-            // Retrieved Current IOp context
-            let iop = self
-                .inner
-                .lock()
-                .unwrap()
-                .iop_ctx
-                .pop_front()
-                .expect("Sync received without associated context");
-
-            // Push iop in stream for lifetime tracking
-            let iop_pkt = Packet::wrap_payload(
-                iop,
-                PacketOptions {
-                    timed: false,
-                    ..Default::default()
-                },
-            );
-            self.hpu_ctx.tx().fwd_pkt(iop_pkt).await;
 
             // Notify Ucore with sync ack
             let ack_pkt = Packet::wrap_payload(
