@@ -329,8 +329,8 @@ impl SrcArgStore {
 /// Local external load cache
 /// Cache some access to enable reuse across IOps
 /// Only store matching between {iid,hid,addr}  and local addr
-// TODO check correct lifetime handling of local buffer
 struct ArgCache {}
+
 /// Number of set in the cache
 const CACHE_SET: usize = 64;
 /// Number of way in each set
@@ -342,6 +342,12 @@ impl Default for ArgCache {
     }
 }
 
+/// Source argument cache
+// NB: it seems a good idea before hand but after some tought dunno if the gain
+//     is really valubale compared to the added complexity in the Fw.
+// *To be discuss*
+// Handling lifetime of variable that are in the cache line are pretty hard.
+// Currently local b2b_pool is handle by iid and it's hard to swap iid ownership on cache it
 impl ArgCache {
     fn try_hit(
         &self,
@@ -349,7 +355,6 @@ impl ArgCache {
         _hpid: hpu_asm::NodeId,
         _cid: hpu_asm::CtId,
     ) -> Option<hpu_asm::CtId> {
-        // TODO do proper impl
         None
     }
     fn register_ct(
@@ -739,6 +744,7 @@ impl UCore {
                         inner.b2b_pool.release_all();
                         inner.user_store = Default::default();
                         inner.dst_store = Default::default();
+                        inner.arg_cache = Default::default();
                     }
 
                     // Update ArgStore context
