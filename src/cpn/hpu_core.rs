@@ -453,7 +453,7 @@ impl HpuCore {
         let inner = self.inner.lock().unwrap();
         let ct = &inner.regfile[reg_id.0 as usize].as_view();
         let trivial = self.as_trivial::<u64>(ct);
-        log!(|self| log::Category::Own, log::Verbosity::Debug=> reg_id, trivial);
+        log!(|self| log::Category::Own, log::Verbosity::Debug => reg_id, trivial);
     }
 }
 

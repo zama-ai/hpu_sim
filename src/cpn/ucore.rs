@@ -802,6 +802,9 @@ impl UCore {
                 _ => panic!("Invalid Dop received as ack. Only DOpSync must be returned"),
             };
 
+            let hid = self.inner.lock().unwrap().config.node_id;
+            println!("Ucore@{hid} DONE=> {dop_sync:?}");
+
             if dop_sync.0.is_inner_sync {
                 // Inner sync, retrived associated notify and issue it
                 let (to_hid, ucore_pld) = {
@@ -898,6 +901,7 @@ impl UCore {
 
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
+            let hid = inner.config.node_id;
 
             // Extract global state based on request sources
             let notify_evt = match var_mode {
@@ -907,6 +911,7 @@ impl UCore {
                         UserVarState::DmaPending(pdg_cnt) => {
                             // Update irq_dma context
                             if *pdg_cnt == 1 {
+                                println!("Ucore{hid} => DMA DONE {var_mode:?}");
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
                                 let (_mode, cid) = irq_dma_ctx
@@ -955,7 +960,7 @@ impl UCore {
                             if *pdg_cnt == 1 {
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
-                                let (_mode, cid) = irq_dma_ctx
+                                let (_mode, _cid) = irq_dma_ctx
                                     .pdg_req
                                     .pop_front()
                                     .expect("Received dma_resp without pending request");
@@ -967,7 +972,7 @@ impl UCore {
                                 false
                             }
                         }
-                        _ => panic!("Receined dst dma_resp on invalid state {state:?}"),
+                        _ => panic!("Received dst dma_resp on invalid state {state:?}"),
                     }
                 }
             };
@@ -1283,6 +1288,7 @@ impl UCore {
         dops: &[hpu_asm::DOp],
     ) -> Result<(), anyhow::Error> {
         let iop_id = iop.get_iid();
+        let hid = self.inner.lock().unwrap().config.node_id;
 
         for dop in dops {
             // Execute DOp directly or [patch] & deferred to Hpu
@@ -1291,23 +1297,22 @@ impl UCore {
                 // NB: An inner sync is automatically append to the stream to enforce execution of previous Dop before notifying
                 // -> Insert a sync and register notify in the queue. When sync returned, issue associated notify
                 // NB': Sync couldn't be reorder by hpu_core, thus use a simple Fifo for notify bufering
-                hpu_asm::DOp::NOTIFY(hpu_asm::dop::DOpNotify(inner)) => {
+                hpu_asm::DOp::NOTIFY(hpu_asm::dop::DOpNotify(op_impl)) => {
                     // Build Ucore payload based on context and current DOp
-                    let raw_cid = match inner.slot {
+                    let raw_cid = match op_impl.slot {
                         hpu_asm::MemId::Addr(ct_id) => ct_id,
                         hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
                             (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
                                 as u16
                                 - bid,
                         ),
-
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
                     let from_hid = hpu_asm::NodeId(self.inner.lock().unwrap().config.node_id);
-                    let to_hid = inner.hid;
+                    let to_hid = op_impl.hid;
 
                     let ucore_pld = hpu_asm::UcorePayload {
-                        mode: hpu_asm::UcorePayloadMode::User(inner.flag),
+                        mode: hpu_asm::UcorePayloadMode::User(op_impl.flag),
                         slot: Some(raw_cid),
                         from_hid,
                         iid: iop.get_iid(),
@@ -1319,20 +1324,22 @@ impl UCore {
                     irq_ack_ctx.pdg_notify.push_back((to_hid, ucore_pld));
                     // Push sync in the stream
                     let inner_sync =
-                        hpu_asm::dop::DOpSync::new(iop.get_iid(), Some(inner.flag)).into();
+                        hpu_asm::dop::DOpSync::new(iop.get_iid(), Some(op_impl.flag)).into();
                     Some(inner_sync)
                 }
-                hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(inner)) => {
+                hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(op_impl)) => {
                     let var_mode = VarMode::User {
                         iid: iop.get_iid(),
-                        flag: inner.flag,
+                        flag: op_impl.flag,
                     };
-                    self.wait_received(&var_mode).await;
+                    // self.wait_received(&var_mode).await;
+                    // TODO correctly select flavored based on CtId value
+                    self.wait_resolved(&var_mode).await;
                     None
                 }
-                hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(inner)) => {
+                hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(op_impl)) => {
                     //1. Construct mode
-                    let raw_cid = match inner.slot {
+                    let raw_cid = match op_impl.slot {
                         hpu_asm::MemId::Addr(ct_id) => ct_id,
                         hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
                             (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
@@ -1344,7 +1351,7 @@ impl UCore {
                     };
                     let var_mode = VarMode::User {
                         iid: iop.get_iid(),
-                        flag: inner.flag,
+                        flag: op_impl.flag,
                     };
 
                     //2. Issue request
@@ -1445,6 +1452,7 @@ impl UCore {
             };
 
             if let Some(dop) = deferred_dop {
+                println!("Ucore@{hid} => {dop:?}");
                 // Wrapped DOp in packet and send them to HpuCore
                 let dop_pkt = Packet::wrap_payload(DOpPayload::new(dop), Default::default());
                 self.hpu_dop.tx().send_pkt(dop_pkt).await?;
@@ -1536,6 +1544,7 @@ impl UCore {
                 match key {
                     VarMode::User { iid, flag } => {
                         let state = &inner.user_store[&(*iid, *flag)];
+                        println!("{key:?} => {state:?}");
                         matches!(state, UserVarState::Resolved(_))
                     }
                     VarMode::ArgSrc { var, blk } => {
