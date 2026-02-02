@@ -1328,9 +1328,16 @@ impl UCore {
                         iid: iop.get_iid(),
                         flag: op_impl.flag,
                     };
-                    // self.wait_received(&var_mode).await;
-                    // TODO correctly select flavored based on CtId value
-                    self.wait_resolved(&var_mode).await;
+                    // Check if data is associated with Wait
+                    // i.e. small trick here data validity is encoded in NodeId
+                    // TODO: Must be change with HIS3.0
+                    if op_impl.hid == hpu_asm::NodeId(0) {
+                        // No data, only wait on event
+                        self.wait_received(&var_mode).await;
+                    } else {
+                        // wait event and data
+                        self.wait_resolved(&var_mode).await;
+                    }
                     None
                 }
                 hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(op_impl)) => {
@@ -1478,7 +1485,12 @@ impl UCore {
                 match key {
                     VarMode::User { iid, flag } => {
                         let state = &inner.user_store[&(*iid, *flag)];
-                        matches!(state, UserVarState::Received(_))
+                        matches!(
+                            state,
+                            UserVarState::Received(_)
+                                | UserVarState::DmaPending(_)
+                                | UserVarState::Resolved(_)
+                        )
                     }
                     _ => panic!("Wait on received is only meaningfull for user sync"),
                 }
