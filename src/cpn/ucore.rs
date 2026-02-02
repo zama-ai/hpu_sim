@@ -802,9 +802,6 @@ impl UCore {
                 _ => panic!("Invalid Dop received as ack. Only DOpSync must be returned"),
             };
 
-            let hid = self.inner.lock().unwrap().config.node_id;
-            println!("Ucore@{hid} DONE=> {dop_sync:?}");
-
             if dop_sync.0.is_inner_sync {
                 // Inner sync, retrived associated notify and issue it
                 let (to_hid, ucore_pld) = {
@@ -911,7 +908,6 @@ impl UCore {
                         UserVarState::DmaPending(pdg_cnt) => {
                             // Update irq_dma context
                             if *pdg_cnt == 1 {
-                                println!("Ucore{hid} => DMA DONE {var_mode:?}");
                                 // All pem_pc slice where retrieved remove from pending request
                                 // and update state
                                 let (_mode, cid) = irq_dma_ctx
@@ -1452,7 +1448,6 @@ impl UCore {
             };
 
             if let Some(dop) = deferred_dop {
-                println!("Ucore@{hid} => {dop:?}");
                 // Wrapped DOp in packet and send them to HpuCore
                 let dop_pkt = Packet::wrap_payload(DOpPayload::new(dop), Default::default());
                 self.hpu_dop.tx().send_pkt(dop_pkt).await?;
@@ -1544,7 +1539,6 @@ impl UCore {
                 match key {
                     VarMode::User { iid, flag } => {
                         let state = &inner.user_store[&(*iid, *flag)];
-                        println!("{key:?} => {state:?}");
                         matches!(state, UserVarState::Resolved(_))
                     }
                     VarMode::ArgSrc { var, blk } => {
