@@ -121,7 +121,7 @@ struct DstArgStore {
 impl Default for DstArgStore {
     fn default() -> Self {
         Self {
-            owner: vec![hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_USER_EVENTS],
+            owner: vec![hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_DST_VARS],
             store: vec![DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
         }
     }
@@ -385,6 +385,7 @@ impl IOpState {
     /// Register ack from a node
     /// Ack are send with associated involved nodes.
     /// NB: An ack register on a is_done entry rearm the counter and clean var states
+    // => TODO correctly define default state => must be != is_done
     fn node_ack(&mut self, iid: hpu_asm::IOpId, iop_nodes: u8) {
         if self.is_done(iid) {
             // Ack considered as a new registration
@@ -1958,37 +1959,45 @@ impl UCore {
         );
         println!("{pld}");
 
-        // Append in execution log for later analyses
-        {
-            let trace_folder = Output::get_trace_folder();
-            let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
-            let rpt_f = format!("{}/executed_iop.rpt", trace_path.to_str().unwrap());
-
-            let rpt_p = std::path::Path::new(&rpt_f);
-            if let Some(dir_p) = rpt_p.parent() {
-                std::fs::create_dir_all(dir_p).unwrap();
-            }
-
-            // Open file
-            let mut wr_f = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(rpt_p)
-                .expect("Error: Unable to open rpt file in append mode");
-            writeln!(
-                wr_f,
-                "{}::{} [{} timeout]",
-                pld.inner.asm_opcode(),
-                pld.get_history().duration(),
-                pld.batch_timeout.len()
-            )
-            .expect("Error: Unable to append to rpt file");
-        }
-
-        // Dump dop execution order for debug
         let trace_folder = Output::get_trace_folder();
         let trace_path = trace_folder.join(std::path::Path::new(self.props.path()));
 
+        // Append in execution log for later analyses
+        let rpt_f = format!("{}/executed_iop.rpt", trace_path.to_str().unwrap());
+        let rpt_p = std::path::Path::new(&rpt_f);
+        if let Some(dir_p) = rpt_p.parent() {
+            std::fs::create_dir_all(dir_p).unwrap();
+        }
+
+        // Open file
+        let mut wr_f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(rpt_p)
+            .expect("Error: Unable to open rpt file in append mode");
+        writeln!(
+            wr_f,
+            "{}::{} [{} timeout]",
+            pld.inner.asm_opcode(),
+            pld.get_history().duration(),
+            pld.batch_timeout.len()
+        )
+        .expect("Error: Unable to append to rpt file");
+
+        // Dump iop in file
+        let iop = &pld.inner;
+        let iid = iop.get_iid();
+
+        let asm_p = format!("{}/iop/iop_{}.asm", trace_path.to_str().unwrap(), iid);
+        let hex_p = format!("{}/iop/iop_{}.hex", trace_path.to_str().unwrap(), iid);
+
+        let mut iop_prog = hpu_asm::Program::default();
+        iop_prog.push_comment(format!("{iop}"));
+        iop_prog.push_stmt(iop.clone());
+        iop_prog.write_asm(&asm_p).unwrap();
+        iop_prog.write_hex(&hex_p).unwrap();
+
+        // Dump dop execution order for debug
         // Generate executed DOp order
         let iopcode = pld.inner.opcode().0;
 
