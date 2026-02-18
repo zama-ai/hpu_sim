@@ -16,6 +16,7 @@
 //!  * Full-table store for User/Arg-Dst events: Those event are not bound to scope and could occured from
 //!    the future
 //!  * Local context for Arg-Src: Those events are bound to current context. Thus, there lifetime are easy to manage
+
 use ra2m::prelude::{
     protocol::{
         addr::{Addr, Pattern},
@@ -114,14 +115,14 @@ enum DstVarState {
 }
 /// Struture able to store DstArg synchronisation state
 struct DstArgStore {
-    owner: Vec<hpu_asm::NodeId>,
+    owner: Vec<hpu_asm::PhysId>,
     store: Vec<DstVarState>,
 }
 
 impl Default for DstArgStore {
     fn default() -> Self {
         Self {
-            owner: vec![hpu_asm::NodeId(u8::max_value()); MAX_IID * MAX_DST_VARS],
+            owner: vec![hpu_asm::PhysId(u8::max_value()); MAX_IID * MAX_DST_VARS],
             store: vec![DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
         }
     }
@@ -155,7 +156,7 @@ impl DstArgStore {
     fn reset_iop(&mut self, iid: hpu_asm::IOpId) {
         for v in 0..MAX_DST_VARS {
             let idx = Self::var_index_from_tuple(iid, v as u8);
-            self.owner[idx] = hpu_asm::NodeId(u8::max_value());
+            self.owner[idx] = hpu_asm::PhysId(u8::max_value());
 
             for b in 0..MAX_VARS_BLK {
                 let idx = Self::blk_index_from_tuple(iid, v as u8, b as u8);
@@ -181,7 +182,7 @@ impl DstArgStore {
     }
 
     /// return position of all blk that belong to current hpu
-    fn get_owned(&self, iid: hpu_asm::IOpId, hid: hpu_asm::NodeId) -> Vec<(u8, u8)> {
+    fn get_owned(&self, iid: hpu_asm::IOpId, hid: hpu_asm::PhysId) -> Vec<(u8, u8)> {
         let mut owned = Vec::new();
         for v in 0..MAX_DST_VARS {
             let idx = Self::var_index_from_tuple(iid, v as u8);
@@ -222,7 +223,7 @@ struct DstNotifyOrder {
     var: u8,
     blk: u8,
     trgt_cid: hpu_asm::CtId,
-    trgt_hid: hpu_asm::NodeId,
+    trgt_hid: hpu_asm::PhysId,
     // local info
     local_cid: hpu_asm::CtId,
 }
@@ -270,8 +271,8 @@ impl SrcArgStore {
         iop.src()[var as usize].props.iid
     }
 
-    /// Get NodeId of var/blk
-    fn src_hid(&self, var: u8, _blk: u8) -> hpu_asm::NodeId {
+    /// Get PhysId of var/blk
+    fn src_hid(&self, var: u8, _blk: u8) -> hpu_asm::PhysId {
         let iop = self
             .cur_iop
             .as_ref()
@@ -352,7 +353,7 @@ impl ArgCache {
     fn try_hit(
         &self,
         _iid: hpu_asm::IOpId,
-        _hpid: hpu_asm::NodeId,
+        _hpid: hpu_asm::PhysId,
         _cid: hpu_asm::CtId,
     ) -> Option<hpu_asm::CtId> {
         None
@@ -360,7 +361,7 @@ impl ArgCache {
     fn register_ct(
         &mut self,
         _iid: hpu_asm::IOpId,
-        _hpid: hpu_asm::NodeId,
+        _hpid: hpu_asm::PhysId,
         _cid: hpu_asm::CtId,
         _local_cid: hpu_asm::CtId,
     ) {
@@ -369,36 +370,59 @@ impl ArgCache {
 }
 
 // IOp synchronisation =================================================================================================
+/// Store IOp State
+/// Small wrapper around pending Hpu counter to properly handle the init case
+/// i.e. Don't see all IOp as done at startup
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IOpState {
+    Unknown,
+    Running(u8),
+    Done,
+}
+
 /// Handle IOp state
 /// Keep track of IOpDone notify
 /// Use to know state of associated variables
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct IOpState([u8; MAX_IID]);
+struct IOpStore([IOpState; MAX_IID]);
 
-impl IOpState {
+impl IOpStore {
     /// Check IOp iid done status
     /// IOp is considered done when all involved nodes have finish
     fn is_done(&self, iid: hpu_asm::IOpId) -> bool {
-        self.0[iid.0 as usize] == 0
+        self.0[iid.0 as usize] == IOpState::Done
     }
 
     /// Register ack from a node
     /// Ack are send with associated involved nodes.
     /// NB: An ack register on a is_done entry rearm the counter and clean var states
-    // => TODO correctly define default state => must be != is_done
-    fn node_ack(&mut self, iid: hpu_asm::IOpId, iop_nodes: u8) {
-        if self.is_done(iid) {
-            // Ack considered as a new registration
-            self.0[iid.0 as usize] = iop_nodes - 1;
-        } else {
-            self.0[iid.0 as usize] -= 1;
+    fn node_ack(&mut self, iid: hpu_asm::IOpId, iop_nodes: u8) -> bool {
+        let state = &mut self.0[iid.0 as usize];
+        match state {
+            IOpState::Unknown | IOpState::Done => {
+                // Ack considered as a new registration
+                *state = IOpState::Running(iop_nodes - 1);
+                false
+            }
+            IOpState::Running(pdg) => {
+                if *pdg == 1 {
+                    *state = IOpState::Done;
+                    true
+                } else {
+                    *state = IOpState::Running(*pdg - 1);
+                    false
+                }
+            }
         }
     }
 }
 
-impl Default for IOpState {
+impl Default for IOpStore {
     fn default() -> Self {
-        Self([0; MAX_IID])
+        let mut dflt = Self([IOpState::Unknown; MAX_IID]);
+        // IOp0 is used described all data that belong to SW and are always ready
+        dflt.0[0] = IOpState::Done;
+        dflt
     }
 }
 
@@ -506,7 +530,7 @@ struct UCoreInner {
     cur_iid: hpu_asm::IOpId,
 
     /// Use to keep track of Iop state in the cluster
-    iop_state: IOpState,
+    iop_state: IOpStore,
 
     // Use for inter-iop sync (i.e. inferred by ucore based on vars position)
     /// Local context (handle Src/dstNotify tracking)
@@ -552,7 +576,7 @@ impl UCoreInner {
 /// Internal structure used only by IrqAck task
 #[derive(Debug, Default)]
 struct IrqAck {
-    pdg_notify: VecDeque<(hpu_asm::NodeId, hpu_asm::UcorePayload)>,
+    pdg_notify: VecDeque<(hpu_asm::PhysId, hpu_asm::UcorePayload)>,
 }
 
 /// Internal structure used only by IrqNotify task
@@ -838,7 +862,7 @@ impl UCore {
                 };
 
                 // Start iop teardown
-                self.iop_teardown(hpu_asm::NodeId(hid), iid, involved_nodes)
+                self.iop_teardown(hpu_asm::PhysId(hid), iid, involved_nodes)
                     .await
                     .expect("Issue with iop teardown");
 
@@ -1034,7 +1058,7 @@ impl UCore {
                                     from_hid.clone(),
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
-                                let to = (hpu_asm::NodeId(inner.config.node_id), flag.trgt_cid);
+                                let to = (hpu_asm::PhysId(inner.config.node_id), flag.trgt_cid);
 
                                 dma_req.push((var_mode, from, to))
                             }
@@ -1060,7 +1084,7 @@ impl UCore {
                                     from_hid.clone(),
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
-                                let to = (hpu_asm::NodeId(node_id), *cid);
+                                let to = (hpu_asm::PhysId(node_id), *cid);
 
                                 dma_req.push((var_mode, from, to));
 
@@ -1079,7 +1103,10 @@ impl UCore {
                     }
                     hpu_asm::UcorePayloadMode::IOpDone(iop_nodes) => {
                         // Register ack
-                        inner.iop_state.node_ack(iid, iop_nodes);
+                        if inner.iop_state.node_ack(iid, iop_nodes) {
+                            // Release b2b_pool slot that belong to current iop
+                            inner.b2b_pool.release_tagged(iid);
+                        }
 
                         // Check if iop is done and execute associated pending work if any
                         if inner.iop_state.is_done(iid) {
@@ -1105,7 +1132,7 @@ impl UCore {
                                         let var_mode = VarMode::ArgSrc { var, blk };
                                         let from =
                                             (from_hid.clone(), inner.local_store.src_cid(var, blk));
-                                        let to = (hpu_asm::NodeId(inner.config.node_id), cid);
+                                        let to = (hpu_asm::PhysId(inner.config.node_id), cid);
 
                                         // Must trigger dma request
                                         dma_req.push((var_mode, from, to));
@@ -1305,8 +1332,11 @@ impl UCore {
                         ),
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
-                    let from_hid = hpu_asm::NodeId(self.inner.lock().unwrap().config.node_id);
-                    let to_hid = op_impl.hid;
+                    let from_hid = hpu_asm::PhysId(self.inner.lock().unwrap().config.node_id);
+                    // NB: op_impl encode virtual Id. It must be translated to physical one
+                    let to_hid = iop.mapping().phys_id(op_impl.hid).expect(
+                        "Error: Invalid VirtId. Provided VirtId isn't registered in IOpMapping",
+                    );
 
                     let ucore_pld = hpu_asm::UcorePayload {
                         mode: hpu_asm::UcorePayloadMode::User(op_impl.flag),
@@ -1330,9 +1360,9 @@ impl UCore {
                         flag: op_impl.flag,
                     };
                     // Check if data is associated with Wait
-                    // i.e. small trick here data validity is encoded in NodeId
+                    // i.e. small trick here data validity is encoded in VirtId
                     // TODO: Must be change with HIS3.0
-                    if op_impl.hid == hpu_asm::NodeId(0) {
+                    if op_impl.hid == hpu_asm::VirtId(0) {
                         // No data, only wait on event
                         self.wait_received(&var_mode).await;
                     } else {
@@ -1541,7 +1571,7 @@ impl UCore {
             }
         }
     }
-    /// Only wain external load resolution
+    /// Only wait external load resolution
     async fn wait_resolved(&self, key: &VarMode) {
         log!(|self| log::Category::Own, log::Verbosity::Trace => key);
 
@@ -1630,7 +1660,7 @@ impl UCore {
                                     .slot
                                     .expect("Ld_b2b required notify with associated data"),
                             );
-                            let to = (hpu_asm::NodeId(config.node_id), dst_cid);
+                            let to = (hpu_asm::PhysId(config.node_id), dst_cid);
 
                             // Update state
                             *state =
@@ -1678,7 +1708,7 @@ impl UCore {
                                     };
                                     // Construct DmaRequest
                                     let from = (var_hid, var_cid);
-                                    let to = (hpu_asm::NodeId(config.node_id), dst_cid);
+                                    let to = (hpu_asm::PhysId(config.node_id), dst_cid);
 
                                     Some((var_mode.clone(), from, to))
                                 }
@@ -1724,8 +1754,8 @@ impl UCore {
     async fn start_dma(
         &self,
         mode: VarMode,
-        from: (hpu_asm::NodeId, hpu_asm::CtId),
-        to: (hpu_asm::NodeId, hpu_asm::CtId),
+        from: (hpu_asm::PhysId, hpu_asm::CtId),
+        to: (hpu_asm::PhysId, hpu_asm::CtId),
     ) {
         log!(|self| log::Category::Own, log::Verbosity::Debug => mode, from, to => "Dma registered");
         let (from_hid, from_cid) = from;
@@ -1792,7 +1822,7 @@ impl UCore {
                             trgt_cid,
                         }),
                         slot: Some(local_cid),
-                        from_hid: hpu_asm::NodeId(hid),
+                        from_hid: hpu_asm::PhysId(hid),
                         iid: for_iid,
                     };
 
@@ -1811,7 +1841,7 @@ impl UCore {
         // Retrieved list of owned dst blok
         let dst_blk = {
             let inner = self.inner.lock().unwrap();
-            let hid = hpu_asm::NodeId(inner.config.node_id);
+            let hid = hpu_asm::PhysId(inner.config.node_id);
 
             inner.dst_store.get_owned(for_iid, hid)
         };
@@ -1834,7 +1864,7 @@ impl UCore {
     /// Kept other one in the queue
     async fn iop_teardown(
         &self,
-        node_id: hpu_asm::NodeId,
+        node_id: hpu_asm::PhysId,
         iid: hpu_asm::IOpId,
         iop_nodes: u8,
     ) -> Result<(), anyhow::Error> {
@@ -1876,10 +1906,10 @@ impl UCore {
         // Update internal state
         let mut inner = self.inner.lock().unwrap();
         // register ack in local entry
-        inner.iop_state.node_ack(iid, iop_nodes);
-
-        // Release b2b_pool slot that belong to current iop
-        inner.b2b_pool.release_tagged(iid);
+        if inner.iop_state.node_ack(iid, iop_nodes) {
+            // Release b2b_pool slot that belong to current iop
+            inner.b2b_pool.release_tagged(iid);
+        }
 
         // Clean dst store for next iteration
         inner.dst_store.reset_iop(iid);
