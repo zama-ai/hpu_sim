@@ -158,28 +158,28 @@ impl std::str::FromStr for PerfParamsName {
     }
 }
 
-impl From<&PerfParamsName> for hc_sim::hpu::HpuConfig {
+impl From<&PerfParamsName> for zhc_sim::hpu::HpuConfig {
     fn from(name: &PerfParamsName) -> Self {
         // Parse PhysicalConfig from toml and convert into HpuConfig
         match name {
-            PerfParamsName::Gaussian44bFast => hc_sim::hpu::PhysicalConfig::gaussian_44b_fast(),
-            PerfParamsName::Gaussian44b => hc_sim::hpu::PhysicalConfig::gaussian_44b(),
+            PerfParamsName::Gaussian44bFast => zhc_sim::hpu::PhysicalConfig::gaussian_44b_fast(),
+            PerfParamsName::Gaussian44b => zhc_sim::hpu::PhysicalConfig::gaussian_44b(),
 
-            PerfParamsName::Gaussian64bFast => hc_sim::hpu::PhysicalConfig::gaussian_64b_fast(),
-            PerfParamsName::Gaussian64b => hc_sim::hpu::PhysicalConfig::gaussian_64b(),
+            PerfParamsName::Gaussian64bFast => zhc_sim::hpu::PhysicalConfig::gaussian_64b_fast(),
+            PerfParamsName::Gaussian64b => zhc_sim::hpu::PhysicalConfig::gaussian_64b(),
             PerfParamsName::Gaussian64bPFail64 => {
-                hc_sim::hpu::PhysicalConfig::gaussian_64b_pfail64()
+                zhc_sim::hpu::PhysicalConfig::gaussian_64b_pfail64()
             }
             PerfParamsName::Gaussian64bPFail64Psi64 => {
-                hc_sim::hpu::PhysicalConfig::gaussian_64b_pfail64_psi64()
+                zhc_sim::hpu::PhysicalConfig::gaussian_64b_pfail64_psi64()
             }
 
-            PerfParamsName::TUniform64bFast => hc_sim::hpu::PhysicalConfig::tuniform_64b_fast(),
+            PerfParamsName::TUniform64bFast => zhc_sim::hpu::PhysicalConfig::tuniform_64b_fast(),
             PerfParamsName::TUniform64bPFail64Psi64 => {
-                hc_sim::hpu::PhysicalConfig::tuniform_64b_pfail64_psi64()
+                zhc_sim::hpu::PhysicalConfig::tuniform_64b_pfail64_psi64()
             }
             PerfParamsName::TUniform64bPFail128Psi64 => {
-                hc_sim::hpu::PhysicalConfig::tuniform_64b_pfail128_psi64()
+                zhc_sim::hpu::PhysicalConfig::tuniform_64b_pfail128_psi64()
             }
             PerfParamsName::CustomPath(path) => {
                 let expand_path = path.expand();

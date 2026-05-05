@@ -1,12 +1,12 @@
 //! Depict Hpu computation core
 
-use hc_langs;
-use hc_sim::hpu as hpu_sim;
-use hc_sim::{Dispatch, Simulatable, Tracer};
 pub use hpu_sim::IscCommand;
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
 use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
+use zhc_langs;
+use zhc_sim::hpu as hpu_sim;
+use zhc_sim::{Dispatch, Simulatable, Tracer};
 
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
@@ -25,8 +25,8 @@ pub struct HpuCoreParams {
     pub compute_params: HpuParameters,
     // Performance config for simulation model
     pub sim_config: hpu_sim::HpuConfig,
-    // Enable hc_sim tracing feature
-    pub sim_trace: bool,
+    // Enable zhc_sim tracing feature
+    pub sim_trace: zhc_sim::TracingLevel,
 
     /// Do trivial computation
     pub trivial: bool,
@@ -170,14 +170,14 @@ impl HpuCore {
     }
     #[teardown]
     fn _teardown(self: Arc<Self>) {
-        if self.params.sim_trace {
+        if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
             // Construct Path
             let filename = format!("{}_isc_sim.json", self.props.path());
             let trace_folder = Output::get_trace_folder();
             let trace_path = trace_folder.join(std::path::Path::new(&filename));
             let inner = self.inner.lock().unwrap();
             inner.sim_tracer.dump(
-                hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 trace_path,
             );
         }
@@ -231,8 +231,9 @@ impl HpuCore {
             } = *inner;
             sim_model.power_up(sim_event);
             sim_model.report(
-                hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 sim_tracer,
+                zhc_sim::TracingLevel::None,
             );
         }
 
@@ -271,9 +272,10 @@ impl HpuCore {
                     // Apply all trigger to sim_model
                     for trigger in batch_trigger.iter() {
                         // Populate hpu ccompiler simulation trace
-                        if self.params.sim_trace {
+                        if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
                             sim_tracer.add_event(
-                                hc_sim::Cycle(
+                                self.params.sim_trace,
+                                zhc_sim::Cycle(
                                     self.props.clock_domain().from_tick(cur_tick()).into(),
                                 ),
                                 &trigger.event,
@@ -303,6 +305,7 @@ impl HpuCore {
                                     .get_slot_properties(dop_id)
                                     .unwrap_or(Default::default());
                                 let trace = isc_trace::IscTrace {
+                                    pe_reserved: 0,
                                     state: isc_trace::IscPoolState {
                                         pdg: props.pdg,
                                         rd_pdg: props.rd_pdg,
@@ -314,12 +317,13 @@ impl HpuCore {
                                             IscCommand::Refill => isc_trace::IscCommand::Refill,
                                             IscCommand::Issue => isc_trace::IscCommand::Issue,
                                         },
-                                        wr_lock: props.wr_lock,
-                                        rd_lock: props.rd_lock,
-                                        issue_lock: props.issue_lock,
-                                        sync_id: 0,
+                                        wr_lock: props.wr_lock as u8,
+                                        rd_lock: props.rd_lock as u8,
+                                        issue_lock: props.issue_lock as u8,
+                                        sync_id: 0, // TODO add proper sync_id tracking
                                     },
                                     insn_hex: dop.inner.to_hex(),
+                                    insn: None,
                                     insn_asm: None,
                                     timestamp: usize::from(
                                         self.props.clock_domain().from_tick(cur_tick()),
@@ -733,7 +737,7 @@ impl HpuCore {
         if let hpu_asm::DOp::SYNC(op_impl) = &dop.inner {
             // Skip report/context update on inner_sync
             if !op_impl.0.is_inner_sync {
-                if self.params.sim_trace {
+                if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner {
                         ref mut sim_model,
@@ -741,8 +745,9 @@ impl HpuCore {
                         ..
                     } = *inner;
                     sim_model.report(
-                        hc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                        zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                         sim_tracer,
+                        self.params.sim_trace,
                     );
                 }
 
@@ -1188,14 +1193,14 @@ impl HpuCore {
     }
 }
 
-// A set of structure used to bridge hc_sim simulation model within Ra2m
+// A set of structure used to bridge zhc_sim simulation model within Ra2m
 // simulation kernel
-struct HpuEventStore<E: hc_sim::Event> {
+struct HpuEventStore<E: zhc_sim::Event> {
     ra2m_clk_d: ClockDomain,
-    triggers: BinaryHeap<hc_sim::Trigger<E>>,
+    triggers: BinaryHeap<zhc_sim::Trigger<E>>,
 }
 
-impl<E: hc_sim::Event> HpuEventStore<E> {
+impl<E: zhc_sim::Event> HpuEventStore<E> {
     fn new(ra2m_clk_d: ClockDomain) -> Self {
         Self {
             ra2m_clk_d,
@@ -1203,11 +1208,11 @@ impl<E: hc_sim::Event> HpuEventStore<E> {
         }
     }
 
-    fn pop_batch(&mut self) -> Vec<hc_sim::Trigger<E>> {
+    fn pop_batch(&mut self) -> Vec<zhc_sim::Trigger<E>> {
         let mut batch = Vec::new();
 
         // Extract targeted cycle
-        let pop_at = if let Some(hc_sim::Trigger { at, .. }) = self.triggers.peek() {
+        let pop_at = if let Some(zhc_sim::Trigger { at, .. }) = self.triggers.peek() {
             *at
         } else {
             // early return
@@ -1226,7 +1231,7 @@ impl<E: hc_sim::Event> HpuEventStore<E> {
         batch
     }
 
-    fn pop_delta(&mut self, delta: hc_sim::Cycle) -> Option<hc_sim::Trigger<E>> {
+    fn pop_delta(&mut self, delta: zhc_sim::Cycle) -> Option<zhc_sim::Trigger<E>> {
         // Pop next subsequent Ord::Equal events if any
         if let Some(next) = self.triggers.peek() {
             if next.at.cmp(&delta) == std::cmp::Ordering::Equal {
@@ -1240,14 +1245,14 @@ impl<E: hc_sim::Event> HpuEventStore<E> {
     }
 }
 
-impl<E: hc_sim::Event> hc_sim::Dispatch for HpuEventStore<E> {
+impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
     type Event = E;
 
-    fn contains_event(&self, event: &Self::Event, filter: Option<hc_sim::Cycle>) -> bool {
+    fn contains_event(&self, event: &Self::Event, filter: Option<zhc_sim::Cycle>) -> bool {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .any(|hc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
+                .any(|zhc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
@@ -1256,14 +1261,14 @@ impl<E: hc_sim::Event> hc_sim::Dispatch for HpuEventStore<E> {
         }
     }
 
-    fn dispatch(&mut self, event: Self::Event, delay: Option<hc_sim::Cycle>) {
+    fn dispatch(&mut self, event: Self::Event, delay: Option<zhc_sim::Cycle>) {
         let ra2m_cycle = self.ra2m_clk_d.from_tick(cur_tick());
         let dispatch_cycle =
-            hc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(hc_sim::Cycle::ZERO);
+            zhc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(zhc_sim::Cycle::ZERO);
 
         // NB: Discard event dispach in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
-            self.triggers.push(hc_sim::Trigger {
+            self.triggers.push(zhc_sim::Trigger {
                 at: dispatch_cycle,
                 event,
             });
@@ -1271,11 +1276,11 @@ impl<E: hc_sim::Event> hc_sim::Dispatch for HpuEventStore<E> {
     }
 }
 
-// Convert tfhe-rs::DOp in hc_sim::DOp
+// Convert tfhe-rs::DOp in zhc_sim::DOp
 // Required current hpu_core context for DOpId extraction
 fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
-    use hc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
     use hpu_sim::{DOp, DOpId, RawDOp};
+    use zhc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
 
     let id = DOpId(pc);
     let raw = match asm_dop {
@@ -1321,7 +1326,7 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
                 addr: inner.0.src1_rid.0 as usize,
             },
             cst: Argument::PtConst {
-                val: inner.0.mul_factor.0 as usize,
+                val: inner.0.mul_factor.0,
             },
         },
         hpu_asm::DOp::ADDS(inner) => RawDOp::ADDS {
@@ -1334,7 +1339,7 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
                 addr: inner.0.src_rid.0 as usize,
             },
             cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as usize,
+                val: inner.0.msg_cst.unwrap_cst() as u8,
             },
         },
         hpu_asm::DOp::SUBS(inner) => RawDOp::SUBS {
@@ -1347,7 +1352,7 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
                 addr: inner.0.src_rid.0 as usize,
             },
             cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as usize,
+                val: inner.0.msg_cst.unwrap_cst() as u8,
             },
         },
         hpu_asm::DOp::SSUB(inner) => RawDOp::SSUB {
@@ -1360,7 +1365,7 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
                 addr: inner.0.src_rid.0 as usize,
             },
             cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as usize,
+                val: inner.0.msg_cst.unwrap_cst() as u8,
             },
         },
         hpu_asm::DOp::MULS(inner) => RawDOp::MULS {
@@ -1373,7 +1378,7 @@ fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
                 addr: inner.0.src_rid.0 as usize,
             },
             cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as usize,
+                val: inner.0.msg_cst.unwrap_cst() as u8,
             },
         },
         hpu_asm::DOp::LD(inner) => RawDOp::LD {

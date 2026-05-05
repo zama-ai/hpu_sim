@@ -158,8 +158,8 @@ fn elaborate(
     let mut node_params = HpuNodeParams {
         hpu_core: HpuCoreParams {
             compute_params: hpu_params.clone(),
-            sim_config: hc_sim::hpu::HpuConfig::from(&args.perf_params),
-            sim_trace: true,
+            sim_config: zhc_sim::hpu::HpuConfig::from(&args.perf_params),
+            sim_trace: zhc_sim::TracingLevel::None,
             trivial: args.trivial,
             noops: args.noops,
             dump_reg: args.dump_reg,

@@ -1,7 +1,9 @@
 [package]
 name = "hpu_sim"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+license = "BSD-3-Clause-Clear"
+repository = "https://github.com/zama-ai/hpu_sim"
 
 [features]
 default = []
@@ -27,19 +29,15 @@ debug-assertions = false
 # NB: Some deps definition is duplicated to enbale != way to fetch them.
 # Select the one that fits the more to your dev experience
 
-# ra2m = {version = "0.1.0", features = []}
+# ra2m = {version = "1.0.0", features = []}
 ra2m = {git = "ssh://git@github.com/zama-ai/ra2m.git", branch = "main", features = []} 
-# ra2m = {path="../ra2m", features = []}
 
-# tfhe = { version = "1.4", features = ["hpu", "hpu-debug"] }
-tfhe = {git = "ssh://git@github.com/zama-ai/tfhe-rs-internal.git", branch = "hw-team/pr/multi-hpu", package = "tfhe", features = ["hpu", "hpu-debug"]} 
+tfhe = { version = "1.6", features = ["hpu", "hpu-debug"] }
+# tfhe = {git = "ssh://git@github.com/zama-ai/tfhe-rs-internal.git", branch = "hw-team/pr/multi-hpu", package = "tfhe", features = ["hpu", "hpu-debug"]} 
 # tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 
-hc_sim = { git = "ssh://git@github.com/zama-ai/hpu_compiler.git", branch= "br/release", package="hc_sim"}
-# hc_sim = { path = "../hpu_compiler/hc_sim"}
-
-hc_langs = { git = "ssh://git@github.com/zama-ai/hpu_compiler.git", branch= "br/release", package="hc_langs"}
-# hc_langs = { path = "../hpu_compiler/hc_langs"}
+zhc_sim = { version = "0.3.0" }
+zhc_langs = { version = "0.3.0" }
 
 clap = { version = "=4.5.30", features = ["derive"] }
 bytemuck = "1.24"

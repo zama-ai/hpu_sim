@@ -1,1 +1,7 @@
+.cargo
+Cargo.lock
 target
+**.DS_Store
+**.svg
+**.html
+**.json
