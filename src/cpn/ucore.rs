@@ -327,48 +327,6 @@ impl SrcArgStore {
     }
 }
 
-/// Local external load cache
-/// Cache some access to enable reuse across IOps
-/// Only store matching between {iid,hid,addr}  and local addr
-struct ArgCache {}
-
-/// Number of set in the cache
-const CACHE_SET: usize = 64;
-/// Number of way in each set
-const CACHE_WAY: usize = 4;
-
-impl Default for ArgCache {
-    fn default() -> Self {
-        Self {}
-    }
-}
-
-/// Source argument cache
-// NB: it seems a good idea before hand but after some tought dunno if the gain
-//     is really valubale compared to the added complexity in the Fw.
-// *To be discuss*
-// Handling lifetime of variable that are in the cache line are pretty hard.
-// Currently local b2b_pool is handle by iid and it's hard to swap iid ownership on cache it
-impl ArgCache {
-    fn try_hit(
-        &self,
-        _iid: hpu_asm::IOpId,
-        _hpid: hpu_asm::PhysId,
-        _cid: hpu_asm::CtId,
-    ) -> Option<hpu_asm::CtId> {
-        None
-    }
-    fn register_ct(
-        &mut self,
-        _iid: hpu_asm::IOpId,
-        _hpid: hpu_asm::PhysId,
-        _cid: hpu_asm::CtId,
-        _local_cid: hpu_asm::CtId,
-    ) {
-        // todo!()
-    }
-}
-
 // IOp synchronisation =================================================================================================
 /// Store IOp State
 /// Small wrapper around pending Hpu counter to properly handle the init case
@@ -492,7 +450,6 @@ impl B2bPool {
 /// UCore parameters
 #[derive(Debug, Clone)]
 pub struct UCoreParams {
-    pub cluster_nodes: Vec<u8>,
     pub fw_pc: MemKind,
 
     /// Ciphertext memory
@@ -565,6 +522,7 @@ impl UcoreConfigWrapped {
             .then(|| unsafe { self.config.assume_init_ref() })
     }
 
+    #[allow(unused)]
     fn is_initialized(&self) -> bool {
         self.initialized
     }
@@ -596,10 +554,6 @@ struct UCoreInner {
     /// Local context (handle Src/dstNotify tracking)
     /// Its bound to current IOp context and reset upon each new IOp
     local_store: SrcArgStore,
-    /// Use for arg reuse across IOp
-    /// This structure is here to enable reuse of local context while keeping
-    ///  the required memory space manageable
-    arg_cache: ArgCache,
 
     /// Use to keep track of Dst notify
     /// Couldn't be completly bound to IOp context (flush in irq_ack on in hpu_feed)
@@ -625,7 +579,6 @@ impl UCoreInner {
             cur_iid: hpu_asm::SW_IOP_ID,
             iop_state: Default::default(),
             local_store: Default::default(),
-            arg_cache: Default::default(),
             dst_notifyq: Default::default(),
             dst_store: Default::default(),
             user_store: Default::default(),
@@ -829,7 +782,6 @@ impl UCore {
                         inner.b2b_pool.release_all();
                         inner.user_store = Default::default();
                         inner.dst_store = Default::default();
-                        inner.arg_cache = Default::default();
                     }
 
                     // Update ArgStore context
@@ -1701,7 +1653,6 @@ impl UCore {
                 ref config,
                 ref mut user_store,
                 local_store: ref mut arg_store,
-                ref arg_cache,
                 ref mut b2b_pool,
                 ref iop_state,
                 ..
@@ -1775,29 +1726,22 @@ impl UCore {
                     match state {
                         SrcVarState::None => {
                             if iop_state.is_done(var_iid) {
-                                // Check if present in the cache
-                                if let Some(hit) = arg_cache.try_hit(var_iid, var_hid, var_cid) {
-                                    // Value present in the cache, update internal state only
-                                    *state = SrcVarState::Resolved(hit);
-                                    None
-                                } else {
-                                    // Value ready but not retrieved yet
-                                    // Update state and register associated dma req
-                                    *state = SrcVarState::DmaPending(
-                                        self.params.rtl_params.pc_params.pem_pc,
-                                    );
+                                // Value ready but not retrieved yet
+                                // Update state and register associated dma req
+                                *state = SrcVarState::DmaPending(
+                                    self.params.rtl_params.pc_params.pem_pc,
+                                );
 
-                                    // Allocate temporary value in the B2B_pool if required
-                                    let dst_cid = match dst {
-                                        Some(cid) => cid,
-                                        None => b2b_pool.get_tagged(cur_iid),
-                                    };
-                                    // Construct DmaRequest
-                                    let from = (var_hid, var_cid);
-                                    let to = (hpu_asm::PhysId(config.node_id), dst_cid);
+                                // Allocate temporary value in the B2B_pool if required
+                                let dst_cid = match dst {
+                                    Some(cid) => cid,
+                                    None => b2b_pool.get_tagged(cur_iid),
+                                };
+                                // Construct DmaRequest
+                                let from = (var_hid, var_cid);
+                                let to = (hpu_asm::PhysId(config.node_id), dst_cid);
 
-                                    Some((var_mode.clone(), from, to))
-                                }
+                                Some((var_mode.clone(), from, to))
                             } else {
                                 // Value not ready
                                 // Allocate temporary value in the B2B_pool if required
@@ -1978,11 +1922,18 @@ impl UCore {
         // This is usefull to check data availability for future IOp without cluttering
         // the ctrl communication channnel
         // => Notify All node that 1 actor over N has finished it's work
-        let notify_order = self
-            .params
-            .cluster_nodes
-            .iter()
-            .filter(|n| **n != node_id.0)
+        let node_mask = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .config
+                .get()
+                .expect("UcoreConfig must be init first")
+                .node_mask
+        };
+
+        let notify_order = (0..hpu_asm::dop::MAX_HPU_IN_CLUSTER as u8)
+            .filter(|n| (node_mask >> (*n as usize)) == 0x1)
+            .filter(|n| *n != node_id.0)
             .map(|n| {
                 let ucore_pld = hpu_asm::UcorePayload {
                     mode: hpu_asm::UcorePayloadMode::IOpDone(iop_nodes),
@@ -1990,7 +1941,7 @@ impl UCore {
                     from_hid: node_id,
                     iid,
                 };
-                Network::new_wrapped(node_id.0, *n, ucore_pld, None)
+                Network::new_wrapped(node_id.0, n, ucore_pld, None)
             })
             .collect::<Vec<_>>();
         self.ctrl

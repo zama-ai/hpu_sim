@@ -173,7 +173,6 @@ fn elaborate(
             hbm_pc_ofst: 0x2000_0000,
         },
         ucore: UCoreParams {
-            cluster_nodes: config.fpga.node_id.clone(),
             fw_pc: config.board.fw_pc,
             ct_pc: config.board.ct_pc.clone(),
             ct_user: config.board.user_size,
