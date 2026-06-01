@@ -4,13 +4,13 @@
 //! Ucore is in charge of IOp to Dop translation and inter-hpu communication
 //! For inter-hpu, it has 3 kind of events two handles:
 //! * Explicit xfer `User`: There are explicit xfer point inside DOp stream. There are known at compile time
-//!    => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
+//!   => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
 //! * Implicit xfer `Arg`: There only known at runtime based on Src/Dst operand position in the cluster.
-//!    Those xfer must be handle differently:
-//!     * Src -> Local work based on global IOp status. Position information expressed in IOp code
-//!        => There are handle during translation phase (i.e only 1 IOp is translated at a time)
-//!     * Dst -> external event carry Ready status and data position (Only local dst position is expressed in IOp)
-//!        => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
+//!   Those xfer must be handle differently:
+//!   * Src -> Local work based on global IOp status. Position information expressed in IOp code
+//!     => There are handle during translation phase (i.e only 1 IOp is translated at a time)
+//!   * Dst -> external event carry Ready status and data position (Only local dst position is expressed in IOp)
+//!     => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
 //!
 //! Thus two kind of handling are used:
 //!  * Full-table store for User/Arg-Dst events: Those event are not bound to scope and could occured from
@@ -122,7 +122,7 @@ struct DstArgStore {
 impl Default for DstArgStore {
     fn default() -> Self {
         Self {
-            owner: vec![hpu_asm::PhysId(u8::max_value()); MAX_IID * MAX_DST_VARS],
+            owner: vec![hpu_asm::PhysId(u8::MAX); MAX_IID * MAX_DST_VARS],
             store: vec![DstVarState::WaitNotify; MAX_IID * MAX_DST_VARS * MAX_VARS_BLK],
         }
     }
@@ -156,7 +156,7 @@ impl DstArgStore {
     fn reset_iop(&mut self, iid: hpu_asm::IOpId) {
         for v in 0..MAX_DST_VARS {
             let idx = Self::var_index_from_tuple(iid, v as u8);
-            self.owner[idx] = hpu_asm::PhysId(u8::max_value());
+            self.owner[idx] = hpu_asm::PhysId(u8::MAX);
 
             for b in 0..MAX_VARS_BLK {
                 let idx = Self::blk_index_from_tuple(iid, v as u8, b as u8);
@@ -317,7 +317,7 @@ impl SrcArgStore {
                 .filter(|(_, op)| op.props.iid == *iid)
                 .flat_map(|(i, op)| {
                     (0..op.props.block.len())
-                        .map(|b| (i as u8, b as u8))
+                        .map(|b| (i as u8, b))
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -1051,11 +1051,7 @@ impl UCore {
 
             let dma_req = {
                 let mut inner = self.inner.lock().unwrap();
-                let config = inner
-                    .config
-                    .get()
-                    .expect("UcoreConfig must be init first")
-                    .clone();
+                let config = *inner.config.get().expect("UcoreConfig must be init first");
                 let node_id = config.node_id;
                 let mut dma_req = Vec::new();
 
@@ -1075,7 +1071,7 @@ impl UCore {
                                     blk: flag.bid,
                                 };
                                 let from = (
-                                    from_hid.clone(),
+                                    from_hid,
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
                                 let to = (hpu_asm::PhysId(config.node_id), flag.trgt_cid);
@@ -1101,7 +1097,7 @@ impl UCore {
                                 // Issue dma request
                                 let var_mode = VarMode::User { iid, flag };
                                 let from = (
-                                    from_hid.clone(),
+                                    from_hid,
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
                                 let to = (hpu_asm::PhysId(node_id), *cid);
@@ -1150,8 +1146,7 @@ impl UCore {
                                         );
 
                                         let var_mode = VarMode::ArgSrc { var, blk };
-                                        let from =
-                                            (from_hid.clone(), inner.local_store.src_cid(var, blk));
+                                        let from = (from_hid, inner.local_store.src_cid(var, blk));
                                         let to = (hpu_asm::PhysId(config.node_id), cid);
 
                                         // Must trigger dma request
@@ -1305,7 +1300,7 @@ impl UCore {
         let dop_len = {
             let mut val = 0_u32;
             self.mem
-                .read(self.properties(), fw_lut_addr + dop_ofst as usize, &mut val)
+                .read(self.properties(), fw_lut_addr + dop_ofst, &mut val)
                 .await
                 .expect("Error while reading fw");
             Self::words_to_bytes::<u32>(val as usize)
@@ -1457,7 +1452,7 @@ impl UCore {
                                         let var_mode = VarMode::ArgSrc { var: tid, blk: bid };
 
                                         // Issue request
-                                        self.ld_b2b(var_mode.clone(), None).await;
+                                        self.ld_b2b(var_mode, None).await;
 
                                         // Wait for resolution (i.e. Dma read finished)
                                         let cid = self.get_resolved(&var_mode).await;
@@ -1584,14 +1579,14 @@ impl UCore {
                     VarMode::User { iid, flag } => {
                         let state = &inner.user_store[&(*iid, *flag)];
                         match state {
-                            UserVarState::Resolved(cid) => Some(cid.clone()),
+                            UserVarState::Resolved(cid) => Some(*cid),
                             _ => None,
                         }
                     }
                     VarMode::ArgSrc { var, blk } => {
                         let state = inner.local_store.src(*var, *blk);
                         match state {
-                            SrcVarState::Resolved(cid) => Some(cid.clone()),
+                            SrcVarState::Resolved(cid) => Some(*cid),
                             _ => None,
                         }
                     }
@@ -1703,7 +1698,7 @@ impl UCore {
                             *state =
                                 UserVarState::DmaPending(self.params.rtl_params.pc_params.pem_pc);
 
-                            Some((var_mode.clone(), from, to))
+                            Some((var_mode, from, to))
                         }
                         UserVarState::DmaPending(_) => {
                             /* Do Nothing */
@@ -1741,7 +1736,7 @@ impl UCore {
                                 let from = (var_hid, var_cid);
                                 let to = (hpu_asm::PhysId(config.node_id), dst_cid);
 
-                                Some((var_mode.clone(), from, to))
+                                Some((var_mode, from, to))
                             } else {
                                 // Value not ready
                                 // Allocate temporary value in the B2B_pool if required
