@@ -1,0 +1,22 @@
+name: Check
+
+on:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout project
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 #v6.0.1
+      with:
+        persist-credentials: 'false'
+    - name: Install just
+      uses: taiki-e/install-action@7ea35f098a7369cd23488403f58be9c491a6c55f # v2.77.0
+      with:
+        tool: just
+    - name: Run checks
+      run: just check
