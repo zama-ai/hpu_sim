@@ -36,8 +36,8 @@ ra2m = {git = "ssh://git@github.com/zama-ai/ra2m.git", branch = "main", features
 tfhe = {git = "ssh://git@github.com/zama-ai/tfhe-rs-internal.git", branch = "hw-team/pr/multi-hpu", package = "tfhe", features = ["hpu", "hpu-debug"]} 
 # tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 
-zhc_sim = { version = "0.3.0" }
-zhc_langs = { version = "0.3.0" }
+zhc_sim = { version = "0.7" }
+zhc_langs = { version = "0.7" }
 
 clap = { version = "=4.5.30", features = ["derive"] }
 bytemuck = "1.24"
