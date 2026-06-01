@@ -518,10 +518,70 @@ pub struct UCoreParams {
     pub hbm_pc_ofst: usize,
 }
 
+/// Ucore config for runtime configuration
+/// Based on C definition but wrapped in custom structur to handle uninit access
+use std::mem::MaybeUninit;
+struct UcoreConfigWrapped {
+    config: MaybeUninit<UcoreConfig>,
+    initialized: bool,
+}
+
+impl UcoreConfigWrapped {
+    fn uninit() -> Self {
+        Self {
+            config: MaybeUninit::uninit(),
+            initialized: false,
+        }
+    }
+
+    // Init structure
+    // Return boolean that detect if an application reset has occured
+    fn init(&mut self, config: UcoreConfig) -> bool {
+        let timestamp = if self.initialized {
+            unsafe {
+                // extract previous timestamp value
+                let old_ts = self.config.assume_init_ref().timestamp;
+                // Drop previous value to avoid memory leak
+                self.config.assume_init_drop();
+                Some(old_ts)
+            }
+        } else {
+            None
+        };
+        self.config.write(config);
+        self.initialized = true;
+
+        if let Some(old_ts) = timestamp {
+            let new_ts = unsafe { self.config.assume_init_ref().timestamp };
+            old_ts != new_ts
+        } else {
+            // NB: new init is considered as a reset
+            true
+        }
+    }
+
+    fn get(&self) -> Option<&UcoreConfig> {
+        self.initialized
+            .then(|| unsafe { self.config.assume_init_ref() })
+    }
+
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+}
+
+impl Drop for UcoreConfigWrapped {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { self.config.assume_init_drop() };
+        }
+    }
+}
+
 /// Store internal state of UCore module
 /// This structure held common value that could be edited by multiple tasks
 struct UCoreInner {
-    config: UcoreConfig,
+    config: UcoreConfigWrapped,
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
     iop_pdg: VecDeque<hpu_asm::IOp>,
     b2b_pool: B2bPool,
@@ -558,7 +618,7 @@ struct UCoreInner {
 impl UCoreInner {
     pub fn new() -> Self {
         Self {
-            config: UcoreConfig::new(Default::default()),
+            config: UcoreConfigWrapped::uninit(),
             iop_stream: VecDeque::new(),
             iop_pdg: VecDeque::new(),
             b2b_pool: B2bPool::new(),
@@ -852,7 +912,11 @@ impl UCore {
                 // Do not pop it to prevent irq_notify to be suspended (and prevent iop_teardown resolution)
                 let (hid, iid, involved_nodes) = {
                     let inner = self.inner.lock().unwrap();
-                    let hid = inner.config.node_id;
+                    let hid = inner
+                        .config
+                        .get()
+                        .expect("UcoreConfig must be init first")
+                        .node_id;
                     let iop = inner
                         .iop_pdg
                         .front()
@@ -923,7 +987,6 @@ impl UCore {
 
             // Update global state accordingly
             let mut inner = self.inner.lock().unwrap();
-            let hid = inner.config.node_id;
 
             // Extract global state based on request sources
             let notify_evt = match var_mode {
@@ -1036,7 +1099,12 @@ impl UCore {
 
             let dma_req = {
                 let mut inner = self.inner.lock().unwrap();
-                let node_id = inner.config.node_id;
+                let config = inner
+                    .config
+                    .get()
+                    .expect("UcoreConfig must be init first")
+                    .clone();
+                let node_id = config.node_id;
                 let mut dma_req = Vec::new();
 
                 match mode {
@@ -1058,14 +1126,14 @@ impl UCore {
                                     from_hid.clone(),
                                     slot.expect("ReadPending required notify with associated data"),
                                 );
-                                let to = (hpu_asm::PhysId(inner.config.node_id), flag.trgt_cid);
+                                let to = (hpu_asm::PhysId(config.node_id), flag.trgt_cid);
 
                                 dma_req.push((var_mode, from, to))
                             }
                             _ => {
                                 panic!(
                                     "Ucore {}: Received duplicated dst event @{iid}::{flag:?} [{mode:?}, {from_hid:?}, {slot:?}]",
-                                    inner.config.node_id
+                                    config.node_id
                                 );
                             }
                         }
@@ -1096,7 +1164,7 @@ impl UCore {
                             _ => {
                                 panic!(
                                     "Ucore {}: Received duplicated event @{iid}::{flag:?} [{mode:?}, {from_hid:?}, {slot:?}]",
-                                    inner.config.node_id
+                                    config.node_id
                                 );
                             }
                         }
@@ -1132,7 +1200,7 @@ impl UCore {
                                         let var_mode = VarMode::ArgSrc { var, blk };
                                         let from =
                                             (from_hid.clone(), inner.local_store.src_cid(var, blk));
-                                        let to = (hpu_asm::PhysId(inner.config.node_id), cid);
+                                        let to = (hpu_asm::PhysId(config.node_id), cid);
 
                                         // Must trigger dma request
                                         dma_req.push((var_mode, from, to));
@@ -1140,7 +1208,7 @@ impl UCore {
                                     _ => {
                                         panic!(
                                             "Ucore {}: Invalid VarState filtering",
-                                            inner.config.node_id
+                                            config.node_id
                                         );
                                     }
                                 }
@@ -1247,7 +1315,7 @@ impl UCore {
         // TODO add proper mechanisms for user side reset request
 
         let mut inner = self.inner.lock().unwrap();
-        inner.config = fw_cfg;
+        inner.config.init(fw_cfg);
     }
 
     /// Read DOp stream from Firmware memory
@@ -1263,7 +1331,11 @@ impl UCore {
         // Read node if from config
         let hid = {
             let inner = self.inner.lock().unwrap();
-            inner.config.node_id
+            inner
+                .config
+                .get()
+                .expect("UcoreConfig must be init first")
+                .node_id
         };
 
         let dop_ofst = {
@@ -1312,7 +1384,16 @@ impl UCore {
         dops: &[hpu_asm::DOp],
     ) -> Result<(), anyhow::Error> {
         let iop_id = iop.get_iid();
-        let hid = self.inner.lock().unwrap().config.node_id;
+
+        // Read node if from config
+        let hid = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .config
+                .get()
+                .expect("UcoreConfig must be init first")
+                .node_id
+        };
 
         for dop in dops {
             // Execute DOp directly or [patch] & deferred to Hpu
@@ -1332,7 +1413,7 @@ impl UCore {
                         ),
                         _ => panic!("Unsupported Ucore memory mode"),
                     };
-                    let from_hid = hpu_asm::PhysId(self.inner.lock().unwrap().config.node_id);
+                    let from_hid = hpu_asm::PhysId(hid);
                     // NB: op_impl encode virtual Id. It must be translated to physical one
                     let to_hid = iop.mapping().phys_id(op_impl.hid).expect(
                         "Error: Invalid VirtId. Provided VirtId isn't registered in IOpMapping",
@@ -1416,9 +1497,7 @@ impl UCore {
                                     let operand = iop.src()[tid as usize];
                                     let op_cid =
                                         hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
-                                    if operand.props.pos.0
-                                        == self.inner.lock().unwrap().config.node_id
-                                    {
+                                    if operand.props.pos.0 == hid {
                                         // Local access -> Usual patching
                                         hpu_asm::MemId::Addr(op_cid)
                                     } else {
@@ -1438,7 +1517,13 @@ impl UCore {
                                     let operand = iop.dst()[tid as usize];
                                     let cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
 
-                                    let op_cid = if operand.props.pos.0 == inner.config.node_id {
+                                    let op_cid = if operand.props.pos.0
+                                        == inner
+                                            .config
+                                            .get()
+                                            .expect("UcoreConfig must be init first")
+                                            .node_id
+                                    {
                                         // Local access -> Usual patching
                                         // Update dst_store accordingly (i.e. toggle to receive to store the fact that value is locally generated)
                                         // Also removed associated DstLdOrder in the queue
@@ -1613,7 +1698,7 @@ impl UCore {
             let mut inner = self.inner.lock().unwrap();
             let UCoreInner {
                 cur_iid,
-                config,
+                ref config,
                 ref mut user_store,
                 local_store: ref mut arg_store,
                 ref arg_cache,
@@ -1623,6 +1708,7 @@ impl UCore {
             } = *inner;
 
             log!(|self| log::Category::Own, log::Verbosity::Debug => var_mode, dst => "Register B2b load");
+            let config = config.get().expect("UcoreConfig must be init first");
 
             match var_mode {
                 // Handle explicit DOp transfer inside an IOp
@@ -1795,7 +1881,11 @@ impl UCore {
         // Retrieved associated notify order
         let (notify_order, hid) = {
             let mut inner = self.inner.lock().unwrap();
-            let hid = inner.config.node_id;
+            let hid = inner
+                .config
+                .get()
+                .expect("UcoreConfig must be init first")
+                .node_id;
 
             let order = inner
                 .dst_notifyq
@@ -1841,7 +1931,13 @@ impl UCore {
         // Retrieved list of owned dst blok
         let dst_blk = {
             let inner = self.inner.lock().unwrap();
-            let hid = hpu_asm::PhysId(inner.config.node_id);
+            let hid = hpu_asm::PhysId(
+                inner
+                    .config
+                    .get()
+                    .expect("UcoreConfig must be init first")
+                    .node_id,
+            );
 
             inner.dst_store.get_owned(for_iid, hid)
         };
@@ -1982,7 +2078,13 @@ impl UCore {
         // Display in console for user real-time inspection
         println!(
             "Ucore {}: Executed IOp: {} in {} [{} timeout]",
-            self.inner.lock().unwrap().config.node_id,
+            self.inner
+                .lock()
+                .unwrap()
+                .config
+                .get()
+                .expect("UcoreConfig must be init first")
+                .node_id,
             pld.inner.asm_opcode(),
             pld.get_history().duration(),
             pld.batch_timeout.len()

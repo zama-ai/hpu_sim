@@ -32,8 +32,8 @@ debug-assertions = false
 # ra2m = {version = "1.0.0", features = []}
 ra2m = {git = "ssh://git@github.com/zama-ai/ra2m.git", branch = "main", features = []} 
 
-tfhe = { version = "1.6", features = ["hpu", "hpu-debug"] }
-# tfhe = {git = "ssh://git@github.com/zama-ai/tfhe-rs-internal.git", branch = "hw-team/pr/multi-hpu", package = "tfhe", features = ["hpu", "hpu-debug"]} 
+# tfhe = { version = "1.6", features = ["hpu", "hpu-debug"] }
+tfhe = {git = "ssh://git@github.com/zama-ai/tfhe-rs-internal.git", branch = "hw-team/pr/multi-hpu", package = "tfhe", features = ["hpu", "hpu-debug"]} 
 # tfhe = { path = "../tfhe-rs-dev/tfhe", features = ["hpu", "hpu-debug"] }
 
 zhc_sim = { version = "0.3.0" }
