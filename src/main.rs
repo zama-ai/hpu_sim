@@ -114,7 +114,7 @@ fn elaborate(
     hpu_params: &HpuParameters,
     args: &Args,
 ) -> Result<module::Area, anyhow::Error> {
-    // Some sanity check on configuration and usefull information extraction
+    // Some sanity check on configuration and useful information extraction
     let (ipc_name, iopq_config, ackq_config) = match &config.fpga.ffi {
         FFIMode::Sim {
             ipc_name,

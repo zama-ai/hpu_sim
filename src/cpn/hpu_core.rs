@@ -33,7 +33,7 @@ pub struct HpuCoreParams {
     /// Disable real tfhe-rs computation
     pub noops: bool,
 
-    /// Dump regsiter
+    /// Dump register
     /// Used to dump execution trace for RTL simulation & debug
     /// Dump register after each update
     pub dump_reg: bool,
@@ -254,7 +254,7 @@ impl HpuCore {
                 .await;
 
                 // Resolve delta-cycle
-                // NB: use to deffered queue for async tasks. Ease handling of inner mutex
+                // NB: use to deferred queue for async tasks. Ease handling of inner mutex
                 let mut deferred_exec = Vec::new();
                 let mut deferred_retire = Vec::new();
                 let mut deferred_trace = Vec::new();
@@ -358,7 +358,7 @@ impl HpuCore {
                         }
                     }
 
-                    // Refill batch_trigger with delta-cycle event (i.e. immediat event that must be resolved in-cycle)
+                    // Refill batch_trigger with delta-cycle event (i.e. immediate event that must be resolved in-cycle)
                     // Pop them one by one to prevent issue with inner simulation filtering
                     if let Some(dc_trigger) = sim_event.pop_delta(delta_cycle) {
                         batch_trigger.push(dc_trigger);
@@ -1266,7 +1266,7 @@ impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
         let dispatch_cycle =
             zhc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(zhc_sim::Cycle::ZERO);
 
-        // NB: Discard event dispach in the current cycle if already present
+        // NB: Discard event dispatch in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
             self.triggers.push(zhc_sim::Trigger {
                 at: dispatch_cycle,

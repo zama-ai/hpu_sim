@@ -4,16 +4,16 @@
 //! Ucore is in charge of IOp to Dop translation and inter-hpu communication
 //! For inter-hpu, it has 3 kind of events two handles:
 //! * Explicit xfer `User`: There are explicit xfer point inside DOp stream. There are known at compile time
-//!   => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
+//!   => Event could occurred outside of current scope (i.e. received from future IOp only running on other node)
 //! * Implicit xfer `Arg`: There only known at runtime based on Src/Dst operand position in the cluster.
 //!   Those xfer must be handle differently:
 //!   * Src -> Local work based on global IOp status. Position information expressed in IOp code
 //!     => There are handle during translation phase (i.e only 1 IOp is translated at a time)
 //!   * Dst -> external event carry Ready status and data position (Only local dst position is expressed in IOp)
-//!     => Event could occured outside of current scope (i.e. received from future IOp only running on other node)
+//!     => Event could occurred outside of current scope (i.e. received from future IOp only running on other node)
 //!
 //! Thus two kind of handling are used:
-//!  * Full-table store for User/Arg-Dst events: Those event are not bound to scope and could occured from
+//!  * Full-table store for User/Arg-Dst events: Those event are not bound to scope and could occurred from
 //!    the future
 //!  * Local context for Arg-Src: Those events are bound to current context. Thus, there lifetime are easy to manage
 
@@ -68,7 +68,7 @@ enum UserVarState {
     Resolved(hpu_asm::CtId),         // Event received and locally resolved in associated mem_id
 }
 
-/// Struture able to store user synchronisation state
+/// Structure able to store user synchronisation state
 struct UserStore(Vec<UserVarState>);
 
 impl Default for UserStore {
@@ -113,7 +113,7 @@ enum DstVarState {
     DmaPending(usize), // Event received and associated dma request already issued
     Resolved,          // Event received and locally resolved in associated mem_id
 }
-/// Struture able to store DstArg synchronisation state
+/// Structure able to store DstArg synchronisation state
 struct DstArgStore {
     owner: Vec<hpu_asm::PhysId>,
     store: Vec<DstVarState>,
@@ -476,7 +476,7 @@ pub struct UCoreParams {
 }
 
 /// Ucore config for runtime configuration
-/// Based on C definition but wrapped in custom structur to handle uninit access
+/// Based on C definition but wrapped in custom structure to handle uninit access
 use std::mem::MaybeUninit;
 struct UcoreConfigWrapped {
     config: MaybeUninit<UcoreConfig>,
@@ -492,7 +492,7 @@ impl UcoreConfigWrapped {
     }
 
     // Init structure
-    // Return boolean that detect if an application reset has occured
+    // Return boolean that detect if an application reset has occurred
     fn init(&mut self, config: UcoreConfig) -> bool {
         let timestamp = if self.initialized {
             unsafe {
@@ -556,7 +556,7 @@ struct UCoreInner {
     local_store: SrcArgStore,
 
     /// Use to keep track of Dst notify
-    /// Couldn't be completly bound to IOp context (flush in irq_ack on in hpu_feed)
+    /// Couldn't be completely bound to IOp context (flush in irq_ack on in hpu_feed)
     /// I.e. bind to IOp translation but must be flush only after sync return
     dst_notifyq: VecDeque<Vec<DstNotifyOrder>>,
 
@@ -608,7 +608,7 @@ pub struct UCore {
     mem: port::ReqRespPort<MemBus>,
 
     // Interface with HpuCore
-    // Slighly different from RTL, indeed iop_ctx is furnished for better context in logging
+    // Slightly different from RTL, indeed iop_ctx is furnished for better context in logging
     #[port]
     hpu_ctx: port::ReqRespPort<IOpPayload>,
     #[port]
@@ -808,7 +808,7 @@ impl UCore {
                     .await
                     .expect("Issue with ucore iop context update");
 
-                // Retrived DOp stream from memory
+                // Retrieved DOp stream from memory
                 let dops = self.load_fw(&iop).await;
                 // handle Dops
                 self.clone()
@@ -840,7 +840,7 @@ impl UCore {
             };
 
             if dop_sync.0.is_inner_sync {
-                // Inner sync, retrived associated notify and issue it
+                // Inner sync, retrieved associated notify and issue it
                 let (to_hid, ucore_pld) = {
                     let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
                     irq_ack_ctx
@@ -882,7 +882,7 @@ impl UCore {
                     .await
                     .expect("Issue with iop teardown");
 
-                // IOp is now completly resolved and could be pop from local queue
+                // IOp is now completely resolved and could be pop from local queue
                 let iop = self
                     .inner
                     .lock()
@@ -1190,7 +1190,7 @@ impl UCore {
         words / std::mem::size_of::<W>()
     }
 
-    /// Utility function to patch immediat argument
+    /// Utility function to patch immediate argument
     fn patch_imm(iop: &hpu_asm::IOp, imm: &mut hpu_asm::ImmId) {
         *imm = match imm {
             hpu_asm::ImmId::Cst(val) => hpu_asm::ImmId::Cst(*val),
@@ -1485,7 +1485,7 @@ impl UCore {
                                         let local_cid = inner.b2b_pool.get_tagged(iop.get_iid());
 
                                         // Create associated entry.
-                                        // NB: only occured for remote access case (i.e. no direct deletion afterward)
+                                        // NB: only occurred for remote access case (i.e. no direct deletion afterward)
                                         let order = DstNotifyOrder {
                                             var: tid,
                                             blk: bid,
@@ -1503,7 +1503,7 @@ impl UCore {
                             };
                             Some(dop_patch)
                         }
-                        // Immediat patching
+                        // Immediate patching
                         hpu_asm::DOp::ADDS(hpu_asm::dop::DOpAdds(inner))
                         | hpu_asm::DOp::SUBS(hpu_asm::dop::DOpSubs(inner))
                         | hpu_asm::DOp::SSUB(hpu_asm::dop::DOpSsub(inner))
@@ -1555,7 +1555,7 @@ impl UCore {
                                 | UserVarState::Resolved(_)
                         )
                     }
-                    _ => panic!("Wait on received is only meaningfull for user sync"),
+                    _ => panic!("Wait on received is only meaningful for user sync"),
                 }
             };
 
@@ -1640,7 +1640,7 @@ impl UCore {
     /// Hook Dma read request in the irq handler infrastructure
     async fn ld_b2b(&self, var_mode: VarMode, dst: Option<hpu_asm::CtId>) {
         // Update associated state
-        // NB: deffered dma_req to prevent issue with inner lock and async context
+        // NB: deferred dma_req to prevent issue with inner lock and async context
         let dma_req = {
             let mut inner = self.inner.lock().unwrap();
             let UCoreInner {
@@ -1867,7 +1867,7 @@ impl UCore {
 
     /// Wait for all local dst load to be resolved
     async fn wait_owned_dst(&self, for_iid: hpu_asm::IOpId) -> Result<(), anyhow::Error> {
-        // Retrieved list of owned dst blok
+        // Retrieved list of owned dst block
         let dst_blk = {
             let inner = self.inner.lock().unwrap();
             let hid = hpu_asm::PhysId(
@@ -1893,7 +1893,7 @@ impl UCore {
     }
 
     /// Iop teardown
-    /// Flush associated deffered work and update internal state
+    /// Flush associated deferred work and update internal state
     /// Also Notify all HpuNode of iop_done
     /// Enable all hpu to know that the IOp is done and view all associated dest operands as valid
     /// Kept other one in the queue
@@ -1914,8 +1914,8 @@ impl UCore {
             .expect("Error while waiting owned dst generated by external node");
 
         // Notify Other HpuNode of IOpEnd
-        // This is usefull to check data availability for future IOp without cluttering
-        // the ctrl communication channnel
+        // This is useful to check data availability for future IOp without cluttering
+        // the ctrl communication channel
         // => Notify All node that 1 actor over N has finished it's work
         let node_mask = {
             let inner = self.inner.lock().unwrap();

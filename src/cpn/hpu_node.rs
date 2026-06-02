@@ -36,7 +36,7 @@ pub struct HpuNode {
 
 impl HpuNode {
     pub fn new(params: HpuNodeParams, props: module::Properties) -> Result<Self, Error> {
-        // Instanciate and bind module
+        // Instantiate and bind module
         let mut inner = module::Area::new(props);
 
         // ===================================================================
