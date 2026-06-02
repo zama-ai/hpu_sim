@@ -1,5 +1,6 @@
 [package]
 name = "hpu_sim"
+description = "Hpu simulation model based on Ra2m"
 version = "1.0.0"
 edition = "2024"
 license = "BSD-3-Clause-Clear"
