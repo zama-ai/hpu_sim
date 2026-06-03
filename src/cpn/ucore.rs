@@ -543,8 +543,6 @@ struct UCoreInner {
     iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
     iop_pdg: VecDeque<hpu_asm::IOp>,
     b2b_pool: B2bPool,
-    // Use to detect restart on the user side (i.e. start of a new application)
-    // TODO replace with proper mechanisms in load_config
     cur_iid: hpu_asm::IOpId,
 
     /// Use to keep track of Iop state in the cluster
@@ -767,21 +765,25 @@ impl UCore {
             };
 
             if let Some(iop) = iop_pdg {
-                self.load_config().await;
+                let has_restart = self.load_config().await;
+
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
                 {
                     // Mutex scope
                     let mut inner = self.inner.lock().unwrap();
 
-                    // Check for user side restart
-                    // I.e. start of a new application that reset the allocator state
-                    // TODO move this in load_config
-                    if inner.cur_iid >= iop.get_iid() {
+                    if has_restart {
+                        // User side restart detected
+                        // I.e. start of a new application that reset the allocator state
                         // Flush internal state
+                        log!(|self| log::Category::Own, log::Verbosity::Info=> => "User side application restart");
                         inner.b2b_pool.release_all();
-                        inner.user_store = Default::default();
+                        inner.iop_state = Default::default();
+                        inner.local_store = Default::default();
+                        inner.dst_notifyq = Default::default();
                         inner.dst_store = Default::default();
+                        inner.user_store = Default::default();
                     }
 
                     // Update ArgStore context
@@ -797,7 +799,7 @@ impl UCore {
 
                 // Update context in HpuCore
                 let iop_pkt = {
-                    let mut pld = IOpPayload::new(iop.clone());
+                    let mut pld = IOpPayload::new(iop.clone(), has_restart);
                     // Insert creator uuid and timestamp
                     pld.wrap_up(*self.props.uid());
                     Packet::wrap_payload(pld, Default::default())
@@ -811,10 +813,12 @@ impl UCore {
                 // Retrieved DOp stream from memory
                 let dops = self.load_fw(&iop).await;
                 // handle Dops
-                self.clone()
-                    .exec_or_deferred(&iop, &dops)
-                    .await
-                    .expect("Issue with ucore exec_or_deferred");
+                if !dops.is_empty() {
+                    self.clone()
+                        .exec_or_deferred(&iop, &dops)
+                        .await
+                        .expect("Issue with ucore exec_or_deferred");
+                }
             } else {
                 delay::Delay::wait_for(self.params.polling_rate.into()).await;
             }
@@ -1024,7 +1028,6 @@ impl UCore {
             // Stall event handling while there is no iop_pending
             // Aims is to correctly detect user reset (i.e. start of new application)
             // and prevent clash with event_list
-            // TODO: Robustify user-reset detection
             let iop_empty = self.inner.lock().unwrap().iop_pdg.is_empty();
             if iop_empty {
                 event::Event::wait(&forge_event_name!(|self| "NoIOpPending")).await;
@@ -1239,7 +1242,7 @@ impl UCore {
     }
 
     /// Update node configuration from DDR
-    async fn load_config(&self) {
+    async fn load_config(&self) -> bool {
         let fw_base_addr = match self.params.fw_pc {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
@@ -1259,10 +1262,8 @@ impl UCore {
 
         let fw_cfg = *bytemuck::from_bytes(fw_cfg_raw.as_slice());
 
-        // TODO add proper mechanisms for user side reset request
-
         let mut inner = self.inner.lock().unwrap();
-        inner.config.init(fw_cfg);
+        inner.config.init(fw_cfg)
     }
 
     /// Read DOp stream from Firmware memory
@@ -1305,22 +1306,28 @@ impl UCore {
                 .expect("Error while reading fw");
             Self::words_to_bytes::<u32>(val as usize)
         };
-        let dop_stream_u8 = self
-            .mem
-            .read_bytes(
-                self.properties(),
-                fw_lut_addr + dop_ofst + std::mem::size_of::<u32>(),
-                dop_len,
-            )
-            .await
-            .expect("Error while reading fw");
-        let dop_stream_u32 = bytemuck::cast_slice::<u8, u32>(&dop_stream_u8);
+        if dop_len != 0 {
+            let dop_stream_u8 = self
+                .mem
+                .read_bytes(
+                    self.properties(),
+                    fw_lut_addr + dop_ofst + std::mem::size_of::<u32>(),
+                    dop_len,
+                )
+                .await
+                .expect("Error while reading fw");
+            let dop_stream_u32 = bytemuck::cast_slice::<u8, u32>(&dop_stream_u8);
 
-        // Parse DOp stream
-        dop_stream_u32
-            .iter()
-            .map(|bin| hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp"))
-            .collect::<Vec<hpu_asm::DOp>>()
+            // Parse DOp stream
+            dop_stream_u32
+                .iter()
+                .map(|bin| hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp"))
+                .collect::<Vec<hpu_asm::DOp>>()
+        } else {
+            println!("[Node{hid}] WARN: {iop} isn't configured");
+            log!(|self| log::Category::Own, log::Verbosity::Warning => iop => "Not configured in translation table");
+            vec![]
+        }
     }
 
     /// Rtl ucore emulation
@@ -1927,7 +1934,7 @@ impl UCore {
         };
 
         let notify_order = (0..hpu_asm::dop::MAX_HPU_IN_CLUSTER as u8)
-            .filter(|n| (node_mask >> (*n as usize)) == 0x1)
+            .filter(|n| ((node_mask >> (*n as usize)) & 0x1) == 0x1)
             .filter(|n| *n != node_id.0)
             .map(|n| {
                 let ucore_pld = hpu_asm::UcorePayload {

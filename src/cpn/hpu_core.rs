@@ -950,12 +950,13 @@ impl HpuCore {
             &NttLweBootstrapKeyOwned<u64>,
         ),
     ) -> Result<(), anyhow::Error> {
-        let sks_is_none = {
+        let refresh = {
             let inner = self.inner.lock().unwrap();
-            inner.sks.is_none()
+            inner.iop_ctx[0].fresh_start || inner.sks.is_none()
         };
+
         // Retrieved key from memory in internal cache
-        if sks_is_none {
+        if refresh {
             // Perf modeling is handled by hpu_compiler model
             // This function is only in charge of behavioral computation
             // => All request across the architecture is made in untimed mode
