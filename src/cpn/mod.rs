@@ -33,6 +33,10 @@ pub struct IOpPayload {
     #[trace]
     asm_view: String,
 
+    /// User application restart
+    /// Use to handle key-cache state
+    fresh_start: bool,
+
     /// Timeout logging
     batch_timeout: Vec<zhc_sim::hpu::DOpId>,
     exec_order: Vec<hpu_asm::DOp>,
@@ -43,11 +47,12 @@ pub struct IOpPayload {
 }
 
 impl IOpPayload {
-    pub fn new(iop: hpu_asm::IOp) -> Self {
+    pub fn new(iop: hpu_asm::IOp, fresh_start: bool) -> Self {
         let asm_view = iop.to_string();
         Self {
             inner: iop,
             asm_view,
+            fresh_start,
             trace: Default::default(),
             batch_timeout: Vec::new(),
             exec_order: Vec::new(),
