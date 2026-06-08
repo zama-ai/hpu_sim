@@ -36,9 +36,8 @@ tfhe = {git = "https://github.com/zama-ai/tfhe-rs.git", branch = "br/multi-hpu",
 zhc_sim = { version = "0.7" }
 zhc_langs = { version = "0.7" }
 
-clap = { version = "=4.5.30", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 bytemuck = "1.24"
 serde = { version = "1", features = ["derive"] }
-itertools = "0.14.0"
 bitfield-struct = "0.12.1"
 toml = { version = "0.8", features = [] }
