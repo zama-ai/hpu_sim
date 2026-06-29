@@ -769,6 +769,7 @@ impl UCore {
 
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
+                // Update ucore state
                 {
                     // Mutex scope
                     let mut inner = self.inner.lock().unwrap();
@@ -797,27 +798,29 @@ impl UCore {
                     event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
                 }
 
-                // Update context in HpuCore
-                let iop_pkt = {
-                    let mut pld = IOpPayload::new(iop.clone(), has_restart);
-                    // Insert creator uuid and timestamp
-                    pld.wrap_up(*self.props.uid());
-                    Packet::wrap_payload(pld, Default::default())
-                };
-                self.hpu_ctx
-                    .tx()
-                    .send_pkt(iop_pkt)
-                    .await
-                    .expect("Issue with ucore iop context update");
-
-                // Retrieved DOp stream from memory
-                let dops = self.load_fw(&iop).await;
-                // handle Dops
-                if !dops.is_empty() {
-                    self.clone()
-                        .exec_or_deferred(&iop, &dops)
+                if let Some(vid) = self.get_vid(&iop) {
+                    // Update context in HpuCore
+                    let iop_pkt = {
+                        let mut pld = IOpPayload::new(iop.clone(), has_restart);
+                        // Insert creator uuid and timestamp
+                        pld.wrap_up(*self.props.uid());
+                        Packet::wrap_payload(pld, Default::default())
+                    };
+                    self.hpu_ctx
+                        .tx()
+                        .send_pkt(iop_pkt)
                         .await
-                        .expect("Issue with ucore exec_or_deferred");
+                        .expect("Issue with ucore iop context update");
+
+                    // Retrieved DOp stream from memory
+                    let dops = self.load_fw_as(&iop, vid).await;
+                    // handle Dops
+                    if !dops.is_empty() {
+                        self.clone()
+                            .exec_or_deferred(&iop, &dops)
+                            .await
+                            .expect("Issue with ucore exec_or_deferred");
+                    }
                 }
             } else {
                 delay::Delay::wait_for(self.params.polling_rate.into()).await;
@@ -1266,8 +1269,20 @@ impl UCore {
         inner.config.init(fw_cfg)
     }
 
+    /// Extract associated virtual Id if any
+    fn get_vid(&self, iop: &hpu_asm::IOp) -> Option<hpu_asm::VirtId> {
+        let inner = self.inner.lock().unwrap();
+        let hid = inner
+            .config
+            .get()
+            .expect("UcoreConfig must be init first")
+            .node_id;
+        iop.mapping().virt_id(hpu_asm::PhysId(hid))
+    }
+
     /// Read DOp stream from Firmware memory
-    async fn load_fw(&self, iop: &hpu_asm::IOp) -> Vec<hpu_asm::DOp> {
+    /// Read it as virtual node vid
+    async fn load_fw_as(&self, iop: &hpu_asm::IOp, vid: hpu_asm::VirtId) -> Vec<hpu_asm::DOp> {
         let fw_base_addr = match self.params.fw_pc {
             MemKind::Ddr { offset } => offset,
             MemKind::Hbm { .. } => {
@@ -1276,22 +1291,12 @@ impl UCore {
         };
         let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>();
 
-        // Read node if from config
-        let hid = {
-            let inner = self.inner.lock().unwrap();
-            inner
-                .config
-                .get()
-                .expect("UcoreConfig must be init first")
-                .node_id
-        };
-
         let dop_ofst = {
             let mut val = 0_u32;
             self.mem
                 .read(
                     self.properties(),
-                    fw_lut_addr + Self::words_to_bytes::<u32>(iop.fw_entry(hid)),
+                    fw_lut_addr + Self::words_to_bytes::<u32>(iop.fw_entry(vid)),
                     &mut val,
                 )
                 .await
@@ -1324,7 +1329,7 @@ impl UCore {
                 .map(|bin| hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp"))
                 .collect::<Vec<hpu_asm::DOp>>()
         } else {
-            println!("[Node{hid}] WARN: {iop} isn't configured");
+            println!("[Node_v{vid}] WARN: {iop} isn't configured");
             log!(|self| log::Category::Own, log::Verbosity::Warning => iop => "Not configured in translation table");
             vec![]
         }
