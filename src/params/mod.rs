@@ -50,7 +50,7 @@ impl std::str::FromStr for ComputeParamsName {
             "tuniform64bpfail128psi64" | "tuniform-64b-pfail128-psi64" => {
                 Self::TUniform64bPFail128Psi64
             }
-            other => Self::CustomPath(ShellString::new(other.to_string())),
+            _ => Self::CustomPath(ShellString::new(s.to_string())),
         })
     }
 }
