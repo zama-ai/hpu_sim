@@ -1286,13 +1286,24 @@ impl UCore {
     /// Read DOp stream from Firmware memory
     /// Read it as virtual node vid
     async fn load_fw_as(&self, iop: &hpu_asm::IOp, vid: hpu_asm::VirtId) -> Vec<hpu_asm::DOp> {
-        let fw_base_addr = match self.params.fw_pc {
-            MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { .. } => {
-                panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
+        let fw_lut_addr = match iop.fw_mode() {
+            hpu_asm::FwMode::Static => match self.params.fw_pc {
+                MemKind::Ddr { offset } => {
+                    offset + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>()
+                }
+                MemKind::Hbm { .. } => {
+                    panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
+                }
+            },
+            hpu_asm::FwMode::Dynamic => {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .config
+                    .get()
+                    .expect("UcoreConfig must be init first")
+                    .zhc_cache_addr as usize
             }
         };
-        let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>();
 
         let dop_ofst = {
             let mut val = 0_u32;
@@ -1306,6 +1317,7 @@ impl UCore {
                 .expect("Error while reading Iopq body");
             val as usize
         };
+
         let dop_len = {
             let mut val = 0_u32;
             self.mem
