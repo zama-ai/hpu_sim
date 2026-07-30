@@ -582,6 +582,16 @@ impl UCoreInner {
             user_store: Default::default(),
         }
     }
+
+    /// Extract associated virtual Id if any
+    fn get_vid(&self, iop: &hpu_asm::IOp) -> Option<hpu_asm::VirtId> {
+        let hid = self
+            .config
+            .get()
+            .expect("UcoreConfig must be init first")
+            .node_id;
+        iop.mapping().virt_id(hpu_asm::PhysId(hid))
+    }
 }
 
 /// Internal structure used only by IrqAck task
@@ -769,8 +779,8 @@ impl UCore {
 
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
-                // Update ucore state
-                {
+                // Update ucore state and extract vid if any
+                let vid = {
                     // Mutex scope
                     let mut inner = self.inner.lock().unwrap();
 
@@ -790,15 +800,19 @@ impl UCore {
                     // Update ArgStore context
                     // And register new entry in DstNotify
                     inner.local_store.reset(iop.clone());
-                    inner.dst_notifyq.push_back(Vec::new());
                     inner.dst_store.init_iop(&iop);
 
                     inner.cur_iid = iop.get_iid();
-                    inner.iop_pdg.push_back(iop.clone());
-                    event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
-                }
+                    let vid = inner.get_vid(&iop);
+                    if vid.is_some() {
+                        inner.dst_notifyq.push_back(Vec::new());
+                        inner.iop_pdg.push_back(iop.clone());
+                        event::Event::triggered(&forge_event_name!(|self| "NoIOpPending"), None);
+                    }
+                    vid
+                };
 
-                if let Some(vid) = self.get_vid(&iop) {
+                if let Some(id) = vid {
                     // Update context in HpuCore
                     let iop_pkt = {
                         let mut pld = IOpPayload::new(iop.clone(), has_restart);
@@ -813,7 +827,7 @@ impl UCore {
                         .expect("Issue with ucore iop context update");
 
                     // Retrieved DOp stream from memory
-                    let dops = self.load_fw_as(&iop, vid).await;
+                    let dops = self.load_fw_as(&iop, id).await;
                     // handle Dops
                     if !dops.is_empty() {
                         self.clone()
@@ -911,7 +925,7 @@ impl UCore {
                 assert_eq!(
                     iop.to_words(),
                     iop_pld.inner.to_words(),
-                    "Mismatch between IOpPayload content and local store"
+                    "Ucore {hid}: Mismatch between IOpPayload content and local store [{iop:?} vs {iop_pld:?}]",
                 );
                 // Generate execution report
                 self.dump_iop_report(&iop_pld);
@@ -1267,17 +1281,6 @@ impl UCore {
 
         let mut inner = self.inner.lock().unwrap();
         inner.config.init(fw_cfg)
-    }
-
-    /// Extract associated virtual Id if any
-    fn get_vid(&self, iop: &hpu_asm::IOp) -> Option<hpu_asm::VirtId> {
-        let inner = self.inner.lock().unwrap();
-        let hid = inner
-            .config
-            .get()
-            .expect("UcoreConfig must be init first")
-            .node_id;
-        iop.mapping().virt_id(hpu_asm::PhysId(hid))
     }
 
     /// Read DOp stream from Firmware memory
