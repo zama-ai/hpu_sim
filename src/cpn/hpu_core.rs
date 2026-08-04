@@ -1198,7 +1198,7 @@ impl HpuCore {
 // simulation kernel
 struct HpuEventStore<E: zhc_sim::Event> {
     ra2m_clk_d: ClockDomain,
-    triggers: BinaryHeap<zhc_sim::Trigger<E>>,
+    triggers: BinaryHeap<std::cmp::Reverse<zhc_sim::Trigger<E>>>,
 }
 
 impl<E: zhc_sim::Event> HpuEventStore<E> {
@@ -1213,7 +1213,7 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
         let mut batch = Vec::new();
 
         // Extract targeted cycle
-        let pop_at = if let Some(zhc_sim::Trigger { at, .. }) = self.triggers.peek() {
+        let pop_at = if let Some(std::cmp::Reverse(zhc_sim::Trigger { at, .. })) = self.triggers.peek() {
             *at
         } else {
             // early return
@@ -1221,9 +1221,9 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
         };
 
         // Pop all subsequent Ord::Equal events
-        while let Some(next) = self.triggers.peek() {
+        while let Some(std::cmp::Reverse(next)) = self.triggers.peek() {
             if next.at.cmp(&pop_at) == std::cmp::Ordering::Equal {
-                batch.push(self.triggers.pop().unwrap());
+                batch.push(self.triggers.pop().unwrap().0);
             } else {
                 break;
             }
@@ -1234,9 +1234,9 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
 
     fn pop_delta(&mut self, delta: zhc_sim::Cycle) -> Option<zhc_sim::Trigger<E>> {
         // Pop next subsequent Ord::Equal events if any
-        if let Some(next) = self.triggers.peek() {
+        if let Some(std::cmp::Reverse(next)) = self.triggers.peek() {
             if next.at.cmp(&delta) == std::cmp::Ordering::Equal {
-                Some(self.triggers.pop().unwrap())
+                Some(self.triggers.pop().unwrap().0)
             } else {
                 None
             }
@@ -1253,11 +1253,11 @@ impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .any(|zhc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
+                .any(|std::cmp::Reverse(zhc_sim::Trigger { at, event: e })| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
-                .map(|trigger| &trigger.event)
+                .map(|trigger| &trigger.0.event)
                 .any(|e| e == event)
         }
     }
@@ -1269,10 +1269,10 @@ impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
 
         // NB: Discard event dispatch in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
-            self.triggers.push(zhc_sim::Trigger {
+            self.triggers.push(std::cmp::Reverse(zhc_sim::Trigger {
                 at: dispatch_cycle,
                 event,
-            });
+            }));
         }
     }
 }
