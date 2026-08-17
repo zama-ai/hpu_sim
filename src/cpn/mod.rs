@@ -38,7 +38,7 @@ pub struct IOpPayload {
     fresh_start: bool,
 
     /// Timeout logging
-    batch_timeout: Vec<zhc_sim::hpu::DOpId>,
+    batch_timeout: Vec<zhc::sim::hpu::DOpId>,
     exec_order: Vec<hpu_asm::DOp>,
 
     /// Contain history of the handling information of a given access through its route across the

@@ -1341,7 +1341,12 @@ impl UCore {
             // Parse DOp stream
             dop_stream_u32
                 .iter()
-                .map(|bin| hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp"))
+                .map(|bin| {
+                    println!("bin => 0x{bin:x}");
+                    let dop = hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp");
+                    println!("Parsed DOp => {dop:?}");
+                    dop
+                })
                 .collect::<Vec<hpu_asm::DOp>>()
         } else {
             println!("[Node_v{vid}] WARN: {iop} isn't configured");
@@ -1405,8 +1410,11 @@ impl UCore {
                     let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
                     irq_ack_ctx.pdg_notify.push_back((to_hid, ucore_pld));
                     // Push sync in the stream
-                    let inner_sync =
-                        hpu_asm::dop::DOpSync::new(iop.get_iid(), Some(op_impl.flag)).into();
+                    let inner_sync = hpu_asm::dop::DOpSync::new(
+                        iop.get_iid(),
+                        Some((op_impl.hid, op_impl.flag)),
+                    )
+                    .into();
                     Some(inner_sync)
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(op_impl)) => {

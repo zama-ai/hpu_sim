@@ -1,12 +1,11 @@
 //! Depict Hpu computation core
 
-pub use hpu_sim::IscCommand;
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
 use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
-use zhc_langs;
-use zhc_sim::hpu as hpu_sim;
-use zhc_sim::{Dispatch, Simulatable, Tracer};
+use zhc::sim::hpu as hpu_sim;
+pub use zhc::sim::hpu::IscCommand;
+use zhc::sim::{Dispatch, Simulatable, Tracer};
 
 use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
@@ -24,9 +23,9 @@ pub struct HpuCoreParams {
     // Compute parameters for tfhe-rs execution
     pub compute_params: HpuParameters,
     // Performance config for simulation model
-    pub sim_config: hpu_sim::HpuConfig,
-    // Enable zhc_sim tracing feature
-    pub sim_trace: zhc_sim::TracingLevel,
+    pub sim_config: zhc::config::hpu::HpuConfig,
+    // Enable zhc::sim tracing feature
+    pub sim_trace: zhc::sim::TracingLevel,
 
     /// Do trivial computation
     pub trivial: bool,
@@ -72,7 +71,7 @@ struct HpuCoreInner {
     /// Bridge Hpu internal perf model inherited from hpu_compiler
     sim_model: hpu_sim::Hpu,
     sim_event: HpuEventStore<hpu_sim::Events>,
-    sim_tracer: Tracer<hpu_sim::Events>,
+    sim_tracer: Tracer,
     /// Keep track of DOpPayload for later behav execution
     dop_map: HashMap<hpu_sim::DOpId, DOpPayload>,
 
@@ -99,7 +98,8 @@ impl HpuCoreInner {
             .collect::<Vec<_>>();
 
         let iop_ctx = VecDeque::new();
-        let sim_model = hpu_sim::Hpu::new(&params.sim_config.clone());
+        let sim_model =
+            hpu_sim::Hpu::new(&params.sim_config.clone(), zhc::langs::hpulang::HpuId(0));
         let sim_event = HpuEventStore::new(ra2m_clk_d);
         let sim_tracer = Tracer::new();
         let dop_map = HashMap::new();
@@ -170,14 +170,14 @@ impl HpuCore {
     }
     #[teardown]
     fn _teardown(self: Arc<Self>) {
-        if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
+        if !matches!(self.params.sim_trace, zhc::sim::TracingLevel::None) {
             // Construct Path
             let filename = format!("{}_isc_sim.json", self.props.path());
             let trace_folder = Output::get_trace_folder();
             let trace_path = trace_folder.join(std::path::Path::new(&filename));
             let inner = self.inner.lock().unwrap();
             inner.sim_tracer.dump(
-                zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                zhc::utils::units::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 trace_path,
             );
         }
@@ -213,7 +213,7 @@ impl HpuCore {
                 inner.dop_map.insert(compiler_dop.id, dop);
                 inner
                     .sim_event
-                    .dispatch(hpu_sim::Events::IscPushDOps(vec![compiler_dop]), None);
+                    .dispatch(hpu_sim::Events::IscPushDOp(compiler_dop), None);
                 // Increment program counter
                 inner.refilled_pc += 1;
                 event::Event::triggered(&forge_event_name!(|self| "SimInnerPushDOp"), None);
@@ -231,9 +231,9 @@ impl HpuCore {
             } = *inner;
             sim_model.power_up(sim_event);
             sim_model.report(
-                zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                zhc::utils::units::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
                 sim_tracer,
-                zhc_sim::TracingLevel::None,
+                zhc::sim::TracingLevel::None,
             );
         }
 
@@ -272,10 +272,10 @@ impl HpuCore {
                     // Apply all trigger to sim_model
                     for trigger in batch_trigger.iter() {
                         // Populate hpu ccompiler simulation trace
-                        if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
+                        if !matches!(self.params.sim_trace, zhc::sim::TracingLevel::None) {
                             sim_tracer.add_event(
                                 self.params.sim_trace,
-                                zhc_sim::Cycle(
+                                zhc::utils::units::Cycle(
                                     self.props.clock_domain().from_tick(cur_tick()).into(),
                                 ),
                                 &trigger.event,
@@ -737,7 +737,7 @@ impl HpuCore {
         if let hpu_asm::DOp::SYNC(op_impl) = &dop.inner {
             // Skip report/context update on inner_sync
             if !op_impl.0.is_inner_sync {
-                if !matches!(self.params.sim_trace, zhc_sim::TracingLevel::None) {
+                if !matches!(self.params.sim_trace, zhc::sim::TracingLevel::None) {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner {
                         ref mut sim_model,
@@ -745,7 +745,9 @@ impl HpuCore {
                         ..
                     } = *inner;
                     sim_model.report(
-                        zhc_sim::Cycle(self.props.clock_domain().from_tick(cur_tick()).into()),
+                        zhc::utils::units::Cycle(
+                            self.props.clock_domain().from_tick(cur_tick()).into(),
+                        ),
                         sim_tracer,
                         self.params.sim_trace,
                     );
@@ -1194,14 +1196,14 @@ impl HpuCore {
     }
 }
 
-// A set of structure used to bridge zhc_sim simulation model within Ra2m
+// A set of structure used to bridge zhc::sim simulation model within Ra2m
 // simulation kernel
-struct HpuEventStore<E: zhc_sim::Event> {
+struct HpuEventStore<E: zhc::sim::Event> {
     ra2m_clk_d: ClockDomain,
-    triggers: BinaryHeap<zhc_sim::Trigger<E>>,
+    triggers: BinaryHeap<zhc::sim::Trigger<E>>,
 }
 
-impl<E: zhc_sim::Event> HpuEventStore<E> {
+impl<E: zhc::sim::Event> HpuEventStore<E> {
     fn new(ra2m_clk_d: ClockDomain) -> Self {
         Self {
             ra2m_clk_d,
@@ -1209,11 +1211,11 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
         }
     }
 
-    fn pop_batch(&mut self) -> Vec<zhc_sim::Trigger<E>> {
+    fn pop_batch(&mut self) -> Vec<zhc::sim::Trigger<E>> {
         let mut batch = Vec::new();
 
         // Extract targeted cycle
-        let pop_at = if let Some(zhc_sim::Trigger { at, .. }) = self.triggers.peek() {
+        let pop_at = if let Some(zhc::sim::Trigger { at, .. }) = self.triggers.peek() {
             *at
         } else {
             // early return
@@ -1232,7 +1234,7 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
         batch
     }
 
-    fn pop_delta(&mut self, delta: zhc_sim::Cycle) -> Option<zhc_sim::Trigger<E>> {
+    fn pop_delta(&mut self, delta: zhc::utils::units::Cycle) -> Option<zhc::sim::Trigger<E>> {
         // Pop next subsequent Ord::Equal events if any
         if let Some(next) = self.triggers.peek() {
             if next.at.cmp(&delta) == std::cmp::Ordering::Equal {
@@ -1246,14 +1248,18 @@ impl<E: zhc_sim::Event> HpuEventStore<E> {
     }
 }
 
-impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
+impl<E: zhc::sim::Event> zhc::sim::Dispatch for HpuEventStore<E> {
     type Event = E;
 
-    fn contains_event(&self, event: &Self::Event, filter: Option<zhc_sim::Cycle>) -> bool {
+    fn contains_event(
+        &self,
+        event: &Self::Event,
+        filter: Option<zhc::utils::units::Cycle>,
+    ) -> bool {
         if let Some(filter_at) = filter.as_ref() {
             self.triggers
                 .iter()
-                .any(|zhc_sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
+                .any(|zhc::sim::Trigger { at, event: e }| (e == event) && (at == filter_at))
         } else {
             self.triggers
                 .iter()
@@ -1262,14 +1268,14 @@ impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
         }
     }
 
-    fn dispatch(&mut self, event: Self::Event, delay: Option<zhc_sim::Cycle>) {
+    fn dispatch(&mut self, event: Self::Event, delay: Option<zhc::utils::units::Cycle>) {
         let ra2m_cycle = self.ra2m_clk_d.from_tick(cur_tick());
-        let dispatch_cycle =
-            zhc_sim::Cycle(ra2m_cycle.into()) + delay.unwrap_or(zhc_sim::Cycle::ZERO);
+        let dispatch_cycle = zhc::utils::units::Cycle(ra2m_cycle.into())
+            + delay.unwrap_or(zhc::utils::units::Cycle::ZERO);
 
         // NB: Discard event dispatch in the current cycle if already present
         if !self.contains_event(&event, Some(dispatch_cycle)) {
-            self.triggers.push(zhc_sim::Trigger {
+            self.triggers.push(zhc::sim::Trigger {
                 at: dispatch_cycle,
                 event,
             });
@@ -1277,11 +1283,11 @@ impl<E: zhc_sim::Event> zhc_sim::Dispatch for HpuEventStore<E> {
     }
 }
 
-// Convert tfhe-rs::DOp in zhc_sim::DOp
+// Convert tfhe-rs::DOp in zhc::sim::DOp
 // Required current hpu_core context for DOpId extraction
 fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
     use hpu_sim::{DOp, DOpId, RawDOp};
-    use zhc_langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
+    use zhc::langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
 
     let id = DOpId(pc);
     let raw = match asm_dop {
