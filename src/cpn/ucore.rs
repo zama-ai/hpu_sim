@@ -1286,13 +1286,24 @@ impl UCore {
     /// Read DOp stream from Firmware memory
     /// Read it as virtual node vid
     async fn load_fw_as(&self, iop: &hpu_asm::IOp, vid: hpu_asm::VirtId) -> Vec<hpu_asm::DOp> {
-        let fw_base_addr = match self.params.fw_pc {
-            MemKind::Ddr { offset } => offset,
-            MemKind::Hbm { .. } => {
-                panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
+        let fw_lut_addr = match iop.fw_mode() {
+            hpu_asm::FwMode::Static => match self.params.fw_pc {
+                MemKind::Ddr { offset } => {
+                    offset + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>()
+                }
+                MemKind::Hbm { .. } => {
+                    panic!("Ucore can't access HBM. Fw translation table must be stored in DDR");
+                }
+            },
+            hpu_asm::FwMode::Dynamic => {
+                let inner = self.inner.lock().unwrap();
+                inner
+                    .config
+                    .get()
+                    .expect("UcoreConfig must be init first")
+                    .zhc_cache_addr as usize
             }
         };
-        let fw_lut_addr = fw_base_addr + FW_RUNTIME_MAX_WORD * std::mem::size_of::<u32>();
 
         let dop_ofst = {
             let mut val = 0_u32;
@@ -1306,6 +1317,7 @@ impl UCore {
                 .expect("Error while reading Iopq body");
             val as usize
         };
+
         let dop_len = {
             let mut val = 0_u32;
             self.mem
@@ -1329,7 +1341,12 @@ impl UCore {
             // Parse DOp stream
             dop_stream_u32
                 .iter()
-                .map(|bin| hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp"))
+                .map(|bin| {
+                    println!("bin => 0x{bin:x}");
+                    let dop = hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp");
+                    println!("Parsed DOp => {dop:?}");
+                    dop
+                })
                 .collect::<Vec<hpu_asm::DOp>>()
         } else {
             println!("[Node_v{vid}] WARN: {iop} isn't configured");
@@ -1393,8 +1410,11 @@ impl UCore {
                     let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
                     irq_ack_ctx.pdg_notify.push_back((to_hid, ucore_pld));
                     // Push sync in the stream
-                    let inner_sync =
-                        hpu_asm::dop::DOpSync::new(iop.get_iid(), Some(op_impl.flag)).into();
+                    let inner_sync = hpu_asm::dop::DOpSync::new(
+                        iop.get_iid(),
+                        Some((op_impl.hid, op_impl.flag)),
+                    )
+                    .into();
                     Some(inner_sync)
                 }
                 hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(op_impl)) => {

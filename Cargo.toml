@@ -31,10 +31,9 @@ debug-assertions = false
 ra2m = {version = "1.0", features = []}
 
 # tfhe = { version = "1.6", features = ["hpu", "hpu-debug"] }
-tfhe = {git = "https://github.com/zama-ai/tfhe-rs.git", branch = "main", package = "tfhe", features = ["hpu", "hpu-debug"]} 
+tfhe = {git = "https://github.com/zama-ai/tfhe-rs.git", branch = "br/zhc", package = "tfhe", features = ["hpu", "hpu-debug"]} 
 
-zhc_sim = { version = "0.7" }
-zhc_langs = { version = "0.7" }
+zhc = { version = "0.9" }
 
 clap = { version = "4.6", features = ["derive"] }
 bytemuck = "1.24"
