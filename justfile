@@ -30,6 +30,24 @@ FMT_SCOPE := if invocation_directory() == justfile_directory() {
 default:
     @just --list
 
+# ── Dependencies ─────────────────────────────────────────────────────────────
+CARGO_LOCK_DIRS := `git ls-files '*Cargo.lock' | xargs -n1 dirname`
+
+lock-check:
+  @for dir in {{CARGO_LOCK_DIRS}}; do \
+      echo "checking Cargo.lock for $dir"; \
+      ( cd $dir && cargo metadata --locked --format-version 1 > /dev/null ) || \
+      ( echo "Cargo.lock for $dir is out of date. Update it with:" && \
+        echo "  just update_cargo_lock" && \
+        echo "then commit the updated Cargo.lock." && exit 1 ); \
+  done
+
+lock-update:
+  @for dir in {{CARGO_LOCK_DIRS}}; do \
+      echo "updating Cargo.lock for $dir"; \
+      ( cd $dir && cargo metadata --format-version 1 > /dev/null ); \
+  done
+
 # ── Format ────────────────────────────────────────────────────────────────────
 
 # Check formatting (scoped to current context)
