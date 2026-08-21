@@ -44,4 +44,4 @@ jobs:
           # DRY_RUN expansion cannot be double quoted when variable contains empty string otherwise cargo publish
           # would fail. This is safe since DRY_RUN is handled in the env section above.
           # shellcheck disable=SC2086
-          cargo publish --workspace ${DRY_RUN}
+          cargo publish --locked --workspace ${DRY_RUN}
