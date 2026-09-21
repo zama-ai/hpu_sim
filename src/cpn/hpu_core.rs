@@ -3,6 +3,7 @@
 use ra2m::prelude::protocol::addr::{Addr, Pattern};
 use ra2m::prelude::types::ClockDomain;
 use ra2m::prelude::{protocol::membus, *};
+use tfhe::tfhe_hpu_backend::prelude::glwe_lookuptable::HpuGlweLookuptable;
 use zhc::sim::hpu as hpu_sim;
 pub use zhc::sim::hpu::IscCommand;
 use zhc::sim::{Dispatch, Simulatable, Tracer};
@@ -14,7 +15,7 @@ use super::{DOpPayload, IOpPayload};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use zhc::langs::doplang::{CtMem, CtReg, DopInstructionSet, PtArg};
+use zhc::langs::doplang::{CtMem, CtReg, DopInstructionSet, LutRef, PtArg};
 
 /// HpuCore parameters
 #[derive(Debug, Clone)]
@@ -37,6 +38,7 @@ pub struct HpuCoreParams {
     pub dump_reg: bool,
 
     // Used memory pseudo-channel
+    pub lut_pc: MemKind,
     pub ct_pc: Vec<MemKind>,
     pub bsk_pc: Vec<MemKind>,
     pub ksk_pc: Vec<MemKind>,
@@ -562,8 +564,7 @@ impl HpuCore {
                 //2. Built request and write data in memory
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
-                for (hpu_slice, addr) in
-                    std::iter::zip(src_ct.as_view().into_container(), ct_addrs)
+                for (hpu_slice, addr) in std::iter::zip(src_ct.as_view().into_container(), ct_addrs)
                 {
                     let data_u8 = bytemuck::cast_slice::<u64, u8>(hpu_slice);
 
@@ -695,28 +696,20 @@ impl HpuCore {
 
                 self.show_trivial_reg(*dst);
             }
-            DopInstructionSet::PBS { dst, src, lut } => {
+            DopInstructionSet::PBS { dst, src, lut }
+            | DopInstructionSet::PBS_F { dst, src, lut } => {
                 self.apply_pbs2reg(1, *dst, *src, *lut).await?;
             }
-            DopInstructionSet::PBS_ML2 { dst, src, lut } => {
+            DopInstructionSet::PBS_ML2 { dst, src, lut }
+            | DopInstructionSet::PBS_ML2_F { dst, src, lut } => {
                 self.apply_pbs2reg(2, *dst, *src, *lut).await?;
             }
-            DopInstructionSet::PBS_ML4 { dst, src, lut } => {
+            DopInstructionSet::PBS_ML4 { dst, src, lut }
+            | DopInstructionSet::PBS_ML4_F { dst, src, lut } => {
                 self.apply_pbs2reg(4, *dst, *src, *lut).await?;
             }
-            DopInstructionSet::PBS_ML8 { dst, src, lut } => {
-                self.apply_pbs2reg(8, *dst, *src, *lut).await?;
-            }
-            DopInstructionSet::PBS_F { dst, src, lut } => {
-                self.apply_pbs2reg(1, *dst, *src, *lut).await?;
-            }
-            DopInstructionSet::PBS_ML2_F { dst, src, lut } => {
-                self.apply_pbs2reg(2, *dst, *src, *lut).await?;
-            }
-            DopInstructionSet::PBS_ML4_F { dst, src, lut } => {
-                self.apply_pbs2reg(4, *dst, *src, *lut).await?;
-            }
-            DopInstructionSet::PBS_ML8_F { dst, src, lut } => {
+            DopInstructionSet::PBS_ML8_F { dst, src, lut }
+            | DopInstructionSet::PBS_ML8 { dst, src, lut } => {
                 self.apply_pbs2reg(8, *dst, *src, *lut).await?;
             }
         }
@@ -799,17 +792,66 @@ impl HpuCore {
     /// TODO: Read PbsLut from Hbm instead of online generation based on Pbs Id
     async fn apply_pbs2reg(
         &self,
-        _opcode_lut_nb: u8,
-        _dst_rid: CtReg,
-        _src_rid: CtReg,
-        _gid: zhc::langs::doplang::LutRef,
+        lut_ml_nb: usize,
+        dst_rid: CtReg,
+        src_rid: CtReg,
+        gid: LutRef,
     ) -> Result<(), anyhow::Error> {
-        // TODO: The fixed `Pbs`/`PbsLut` enum this used to decode `gid` analytically was removed
-        // from tfhe-hpu-backend when DOp definitions moved to zhc; LUT content now lives in a
-        // runtime `LutRegistry` uploaded into HBM/DDR (see `interface/cache/lut.rs`), which
-        // hpu_sim has no equivalent memory channel or upload path for yet. Left as a stub
-        // pending that infrastructure (deliberately deferred, see PR discussion).
-        todo!("PBS LUT content resolution: needs a simulated lut_pc memory channel + upload path")
+        assert_eq!(
+            dst_rid.mask,
+            u8::MAX << (lut_ml_nb - 1),
+            "Pbs destination register {dst_rid:?} must be aligned with lut_ml_nb {lut_ml_nb}"
+        );
+
+        let mut cpu_reg = self.reg2cpu(src_rid);
+
+        // Read Lut
+        let mut tfhe_lut = self.lut2cpu(gid).await?;
+
+        if self.params.trivial {
+            self.show_trivial_reg(src_rid);
+        }
+
+        self.with_server_key(|ksk, bfr_after_ks, bsk| {
+            keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
+
+            let modulus_switch_type = self.params.compute_params.pbs_params.modulus_switch_type;
+
+            let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
+            let bfr_after_ms = match modulus_switch_type {
+                HpuModulusSwitchType::Standard => {
+                    lwe_ciphertext_modulus_switch(bfr_after_ks.as_view(), log_modulus)
+                }
+                HpuModulusSwitchType::CenteredMeanNoiseReduction => {
+                    lwe_ciphertext_centered_binary_modulus_switch(
+                        bfr_after_ks.as_view(),
+                        log_modulus,
+                    )
+                }
+            };
+            blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, bsk);
+        })
+        .await?;
+
+        // Compute ManyLut function stride
+        let fn_stride = {
+            let pbs_p = &self.params.compute_params.pbs_params;
+            let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
+            let box_size = pbs_p.polynomial_size / modulus_sup;
+            // Max valid degree for a ciphertext when using the LUT we generate
+            // If MaxDegree == 1, we can have two input values 0 and 1, so we need MaxDegree + 1
+            // boxes
+            let max_degree = modulus_sup / lut_ml_nb;
+            max_degree * box_size
+        };
+
+        for fn_idx in 0..lut_ml_nb {
+            let monomial_degree = MonomialDegree(fn_idx * fn_stride);
+            extract_lwe_sample_from_glwe_ciphertext(&tfhe_lut, &mut cpu_reg, monomial_degree);
+            let manylut_rid = CtReg::new(dst_rid.addr + fn_idx as u8);
+            self.cpu2reg(manylut_rid, cpu_reg.as_view());
+        }
+        Ok(())
     }
 
     // NB: to prevent issues with borrow checker we have to clone the value from
@@ -836,6 +878,49 @@ impl HpuCore {
         .for_each(|(reg, hpu)| {
             reg.copy_from_slice(hpu.as_slice());
         });
+    }
+
+    /// Read Cpu lut from lut memory
+    async fn lut2cpu(&self, gid: LutRef) -> Result<GlweCiphertextOwned<u64>, anyhow::Error> {
+        let lut_size_b = page_align(
+            hpu_glwe_lookuptable_size(&self.params.compute_params) * std::mem::size_of::<u64>(),
+        );
+        let lut_ofst = gid.id as usize * lut_size_b;
+
+        // WARN: this only work if lut_mem is allocated at begin channel
+        // TODO read offset from regmap register
+        let lut_addr = Addr::Phys(match self.params.lut_pc {
+            MemKind::Ddr { offset } => offset + lut_ofst,
+            MemKind::Hbm { pc } => {
+                self.params.hbm_global_ofst + pc * self.params.hbm_pc_ofst + lut_ofst
+            }
+        });
+        let hpu_lut = {
+            let mut container = HpuGlweLookuptable::new(0, self.params.compute_params.clone());
+            let lut_mem = self
+                .mem
+                .b_req_resp(membus::MemBus::new_wrapped(
+                    self.props.uid(),
+                    membus::Command::Read,
+                    lut_addr,
+                    Pattern::Simple(lut_size_b.Byte()),
+                    None,
+                    Some(PacketOptions {
+                        timed: false,
+                        ..Default::default()
+                    }),
+                ))
+                .await?
+                .unwrap_payload();
+
+            let lut_view = container.as_mut_view().into_container();
+            let raw_data = lut_mem.data().as_slice();
+            let size_b = std::mem::size_of_val(lut_view);
+            let data_u64 = bytemuck::cast_slice::<u8, u64>(&raw_data[0..size_b]);
+            lut_view.clone_from_slice(data_u64);
+            container
+        };
+        Ok(GlweCiphertext::from(hpu_lut.as_view()))
     }
 
     /// Closure used to work with server_key

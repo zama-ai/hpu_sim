@@ -164,6 +164,7 @@ fn elaborate(
             noops: args.noops,
             dump_reg: args.dump_reg,
 
+            lut_pc: config.board.lut_pc.clone(),
             ct_pc: config.board.ct_pc.clone(),
             ksk_pc: config.board.ksk_pc.clone(),
             bsk_pc: config.board.bsk_pc.clone(),
