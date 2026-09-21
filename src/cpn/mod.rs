@@ -2,13 +2,14 @@ use std::collections::VecDeque;
 
 use ra2m::prelude::*;
 use tfhe::tfhe_hpu_backend::prelude::*;
+use zhc::langs::doplang::DopInstructionSet;
 
 pub mod hpu_core;
 pub use hpu_core::{HpuCore, HpuCoreParams, IscCommand};
 pub mod hpu_node;
 pub use hpu_node::{HpuNode, HpuNodeParams};
 pub mod ucore;
-pub use ucore::{UCore, UCoreParams};
+pub use ucore::{UCore, UCoreParams, UcorePayload};
 
 pub mod regmap;
 pub use regmap::{Regmap, RegmapParams};
@@ -39,7 +40,7 @@ pub struct IOpPayload {
 
     /// Timeout logging
     batch_timeout: Vec<zhc::sim::hpu::DOpId>,
-    exec_order: Vec<hpu_asm::DOp>,
+    exec_order: Vec<DopInstructionSet>,
 
     /// Contain history of the handling information of a given access through its route across the
     /// architecture (From the requester up to the responder and back for acknowledgement)
@@ -82,7 +83,7 @@ impl RxStatus for IOpPayload {
 #[history(trace)]
 #[trace_custom(IscCommand)]
 pub struct DOpPayload {
-    inner: hpu_asm::DOp,
+    inner: DopInstructionSet,
 
     // inner assembly view as String
     // Use for tracing only, since we cannot implement foreign trait Traceable on foreign type DOp
@@ -95,7 +96,7 @@ pub struct DOpPayload {
 }
 
 impl DOpPayload {
-    pub fn new(dop: hpu_asm::DOp) -> Self {
+    pub fn new(dop: DopInstructionSet) -> Self {
         let asm_view = dop.to_string();
         Self {
             inner: dop,

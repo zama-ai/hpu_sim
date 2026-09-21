@@ -27,6 +27,9 @@ use ra2m::prelude::{
     *,
 };
 use tfhe::tfhe_hpu_backend::prelude::*;
+use zhc::langs::doplang::{
+    CtDstVar, CtHeap, CtIo, CtMem, CtSrcVar, DopInstructionSet, PtArg, PtConst, PtSrcVar, UserFlag,
+};
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -34,6 +37,42 @@ use std::{
 };
 
 use super::{DOpPayload, IOpPayload};
+
+// Ucore-to-Ucore control-plane message.
+//
+// Mirrors the wire type formerly re-exported from `tfhe_hpu_backend::asm::dop`; that module was
+// removed when DOp definitions moved to zhc (see `zhc_langs::doplang`), but this protocol is
+// internal to hpu_sim's own inter-node `ctrl` simulation (it never existed on real hardware) and
+// has no upstream equivalent to reuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UcorePayload {
+    pub mode: UcorePayloadMode,
+    pub slot: Option<hpu_asm::CtId>,
+    pub from_hid: hpu_asm::PhysId,
+    pub iid: hpu_asm::IOpId,
+}
+
+/// Ucore payload could be issued by:
+/// * user (i.e. from DOp) -> use as barrier inside same IOp
+/// * ucore: Src/Dst barrier between IOps
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UcorePayloadMode {
+    Ucore(UcoreFlag),
+    User(UserFlag),
+    IOpDone(u8),
+}
+
+/// Describe ucore event flag. It's like a hash/UUID for matching Ucore instruction together
+/// Ucore event are used for Src/Dst arguments fetching
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UcoreFlag {
+    pub tid: u8,
+    pub bid: u8,
+    //NB: Targeted Hpu could have not received associated IOp (with trgt dst position)
+    // Giving position in the payload enable direct data fetch
+    pub trgt_cid: hpu_asm::CtId,
+}
+
 
 // Define a set of constant
 // Use constant instead of parameters to have static allocation of array (and thus mimics real Fw impl)
@@ -63,7 +102,7 @@ const MAX_IID: usize = 1 << 8;
 enum UserVarState {
     None,                            // Event not received yet
     ReadPending(hpu_asm::CtId),      // Event not received but read is already pending
-    Received(hpu_asm::UcorePayload), // Event received but not handled yet
+    Received(UcorePayload), // Event received but not handled yet
     DmaPending(usize),               // Event received and associated dma request already issued
     Resolved(hpu_asm::CtId),         // Event received and locally resolved in associated mem_id
 }
@@ -78,29 +117,29 @@ impl Default for UserStore {
 }
 
 impl UserStore {
-    fn index_from_tuple(iid: hpu_asm::IOpId, flag: hpu_asm::UserFlag) -> usize {
+    fn index_from_tuple(iid: hpu_asm::IOpId, flag: UserFlag) -> usize {
         assert!(
             iid.0 as usize <= MAX_IID,
             "Error: looking for event that belong to invalid IOpId"
         );
         assert!(
-            flag.0 as usize <= MAX_USER_EVENTS,
+            flag.flag as usize <= MAX_USER_EVENTS,
             "Error: looking for event with invalid user flag"
         );
-        iid.0 as usize * MAX_USER_EVENTS + flag.0 as usize
+        iid.0 as usize * MAX_USER_EVENTS + flag.flag as usize
     }
 }
 
-impl std::ops::Index<&(hpu_asm::IOpId, hpu_asm::UserFlag)> for UserStore {
+impl std::ops::Index<&(hpu_asm::IOpId, UserFlag)> for UserStore {
     type Output = UserVarState;
 
-    fn index(&self, index: &(hpu_asm::IOpId, hpu_asm::UserFlag)) -> &Self::Output {
+    fn index(&self, index: &(hpu_asm::IOpId, UserFlag)) -> &Self::Output {
         &self.0[Self::index_from_tuple(index.0, index.1)]
     }
 }
 
-impl std::ops::IndexMut<&(hpu_asm::IOpId, hpu_asm::UserFlag)> for UserStore {
-    fn index_mut(&mut self, index: &(hpu_asm::IOpId, hpu_asm::UserFlag)) -> &mut Self::Output {
+impl std::ops::IndexMut<&(hpu_asm::IOpId, UserFlag)> for UserStore {
+    fn index_mut(&mut self, index: &(hpu_asm::IOpId, UserFlag)) -> &mut Self::Output {
         &mut self.0[Self::index_from_tuple(index.0, index.1)]
     }
 }
@@ -390,7 +429,7 @@ impl Default for IOpStore {
 enum VarMode {
     User {
         iid: hpu_asm::IOpId,
-        flag: hpu_asm::UserFlag,
+        flag: UserFlag,
     },
     ArgSrc {
         var: u8,
@@ -540,7 +579,7 @@ impl Drop for UcoreConfigWrapped {
 /// This structure held common value that could be edited by multiple tasks
 struct UCoreInner {
     config: UcoreConfigWrapped,
-    iop_stream: VecDeque<hpu_asm::iop::IOpWordRepr>,
+    iop_stream: VecDeque<hpu_asm::IOpWordRepr>,
     iop_pdg: VecDeque<hpu_asm::IOp>,
     b2b_pool: B2bPool,
     cur_iid: hpu_asm::IOpId,
@@ -597,7 +636,7 @@ impl UCoreInner {
 /// Internal structure used only by IrqAck task
 #[derive(Debug, Default)]
 struct IrqAck {
-    pdg_notify: VecDeque<(hpu_asm::PhysId, hpu_asm::UcorePayload)>,
+    pdg_notify: VecDeque<(hpu_asm::PhysId, UcorePayload)>,
 }
 
 /// Internal structure used only by IrqNotify task
@@ -624,7 +663,7 @@ pub struct UCore {
 
     /// Ctrl: Issue/Received control token for interboard synchronisation
     #[port]
-    ctrl: port::ReqRespPort<Network<u8, hpu_asm::UcorePayload>>,
+    ctrl: port::ReqRespPort<Network<u8, UcorePayload>>,
 
     /// dma: Issue Dma request for interboard communication
     #[port]
@@ -855,12 +894,12 @@ impl UCore {
                 .unwrap_payload();
             log!(|self| log::Category::Own, log::Verbosity::Debug => dop_sync => "Sync received");
 
-            let dop_sync = match dop_sync.inner {
-                hpu_asm::DOp::SYNC(dop_sync) => dop_sync,
+            let is_inner_sync = match dop_sync.inner {
+                DopInstructionSet::SYNC { is_inner, .. } => is_inner,
                 _ => panic!("Invalid Dop received as ack. Only DOpSync must be returned"),
             };
 
-            if dop_sync.0.is_inner_sync {
+            if is_inner_sync {
                 // Inner sync, retrieved associated notify and issue it
                 let (to_hid, ucore_pld) = {
                     let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
@@ -1062,7 +1101,7 @@ impl UCore {
             log!(|self| log::Category::Own, log::Verbosity::Debug => ucore_pld => "Notify received");
 
             // Update internal state
-            let hpu_asm::UcorePayload {
+            let UcorePayload {
                 mode,
                 slot,
                 from_hid,
@@ -1076,7 +1115,7 @@ impl UCore {
                 let mut dma_req = Vec::new();
 
                 match mode {
-                    hpu_asm::UcorePayloadMode::Ucore(flag) => {
+                    UcorePayloadMode::Ucore(flag) => {
                         let state = &mut inner.dst_store[&(iid, flag.tid, flag.bid)];
                         match state {
                             DstVarState::WaitNotify => {
@@ -1106,7 +1145,7 @@ impl UCore {
                             }
                         }
                     }
-                    hpu_asm::UcorePayloadMode::User(flag) => {
+                    UcorePayloadMode::User(flag) => {
                         let state = &mut inner.user_store[&(iid, flag)];
                         match state {
                             UserVarState::None => {
@@ -1137,7 +1176,7 @@ impl UCore {
                             }
                         }
                     }
-                    hpu_asm::UcorePayloadMode::IOpDone(iop_nodes) => {
+                    UcorePayloadMode::IOpDone(iop_nodes) => {
                         // Register ack
                         if inner.iop_state.node_ack(iid, iop_nodes) {
                             // Release b2b_pool slot that belong to current iop
@@ -1211,12 +1250,12 @@ impl UCore {
     }
 
     /// Utility function to patch immediate argument
-    fn patch_imm(iop: &hpu_asm::IOp, imm: &mut hpu_asm::ImmId) {
+    fn patch_imm(iop: &hpu_asm::IOp, imm: &mut PtArg) {
         *imm = match imm {
-            hpu_asm::ImmId::Cst(val) => hpu_asm::ImmId::Cst(*val),
-            hpu_asm::ImmId::Var { tid, bid } => {
-                hpu_asm::ImmId::Cst(iop.imm()[*tid as usize].msg_block(*bid))
-            }
+            PtArg::Const(cst) => PtArg::Const(*cst),
+            PtArg::Var(PtSrcVar { id, block }) => PtArg::Const(PtConst::new(
+                iop.imm()[*id as usize].msg_block(*block) as u8,
+            )),
         }
     }
 
@@ -1285,7 +1324,7 @@ impl UCore {
 
     /// Read DOp stream from Firmware memory
     /// Read it as virtual node vid
-    async fn load_fw_as(&self, iop: &hpu_asm::IOp, vid: hpu_asm::VirtId) -> Vec<hpu_asm::DOp> {
+    async fn load_fw_as(&self, iop: &hpu_asm::IOp, vid: hpu_asm::VirtId) -> Vec<DopInstructionSet> {
         let fw_lut_addr = match iop.fw_mode() {
             hpu_asm::FwMode::Static => match self.params.fw_pc {
                 MemKind::Ddr { offset } => {
@@ -1301,7 +1340,7 @@ impl UCore {
                     .config
                     .get()
                     .expect("UcoreConfig must be init first")
-                    .zhc_cache_addr as usize
+                    .dyn_iop_addr as usize
             }
         };
 
@@ -1343,11 +1382,12 @@ impl UCore {
                 .iter()
                 .map(|bin| {
                     println!("bin => 0x{bin:x}");
-                    let dop = hpu_asm::DOp::from_hex(*bin).expect("Invalid DOp");
+                    let dop = zhc::pipeline::passes::hpu_decode_dop_repr(*bin, None)
+                        .expect("Invalid DOp");
                     println!("Parsed DOp => {dop:?}");
                     dop
                 })
-                .collect::<Vec<hpu_asm::DOp>>()
+                .collect::<Vec<DopInstructionSet>>()
         } else {
             println!("[Node_v{vid}] WARN: {iop} isn't configured");
             log!(|self| log::Category::Own, log::Verbosity::Warning => iop => "Not configured in translation table");
@@ -1360,7 +1400,7 @@ impl UCore {
     async fn exec_or_deferred(
         self: Arc<Self>,
         iop: &hpu_asm::IOp,
-        dops: &[hpu_asm::DOp],
+        dops: &[DopInstructionSet],
     ) -> Result<(), anyhow::Error> {
         let iop_id = iop.get_iid();
 
@@ -1381,25 +1421,17 @@ impl UCore {
                 // NB: An inner sync is automatically append to the stream to enforce execution of previous Dop before notifying
                 // -> Insert a sync and register notify in the queue. When sync returned, issue associated notify
                 // NB': Sync couldn't be reorder by hpu_core, thus use a simple Fifo for notify bufering
-                hpu_asm::DOp::NOTIFY(hpu_asm::dop::DOpNotify(op_impl)) => {
+                DopInstructionSet::NOTIFY { virt_id, flag, slot } => {
                     // Build Ucore payload based on context and current DOp
-                    let raw_cid = match op_impl.slot {
-                        hpu_asm::MemId::Addr(ct_id) => ct_id,
-                        hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
-                            (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
-                                as u16
-                                - bid,
-                        ),
-                        _ => panic!("Unsupported Ucore memory mode"),
-                    };
+                    let raw_cid = self.ctmem_to_cid(*slot);
                     let from_hid = hpu_asm::PhysId(hid);
                     // NB: op_impl encode virtual Id. It must be translated to physical one
-                    let to_hid = iop.mapping().phys_id(op_impl.hid).expect(
+                    let to_hid = iop.mapping().phys_id(hpu_asm::VirtId(virt_id.id)).expect(
                         "Error: Invalid VirtId. Provided VirtId isn't registered in IOpMapping",
                     );
 
-                    let ucore_pld = hpu_asm::UcorePayload {
-                        mode: hpu_asm::UcorePayloadMode::User(op_impl.flag),
+                    let ucore_pld = UcorePayload {
+                        mode: UcorePayloadMode::User(*flag),
                         slot: Some(raw_cid),
                         from_hid,
                         iid: iop.get_iid(),
@@ -1410,45 +1442,39 @@ impl UCore {
                     let mut irq_ack_ctx = self.irq_ack_ctx.lock().unwrap();
                     irq_ack_ctx.pdg_notify.push_back((to_hid, ucore_pld));
                     // Push sync in the stream
-                    let inner_sync = hpu_asm::dop::DOpSync::new(
-                        iop.get_iid(),
-                        Some((op_impl.hid, op_impl.flag)),
-                    )
-                    .into();
+                    let inner_sync = DopInstructionSet::SYNC {
+                        is_inner: true,
+                        flag: *flag,
+                        hid: *virt_id,
+                        iid: iop.get_iid().0,
+                    };
                     Some(inner_sync)
                 }
-                hpu_asm::DOp::WAIT(hpu_asm::dop::DOpWait(op_impl)) => {
+                DopInstructionSet::WAIT { flag, slot } => {
                     let var_mode = VarMode::User {
                         iid: iop.get_iid(),
-                        flag: op_impl.flag,
+                        flag: *flag,
                     };
                     // Check if data is associated with Wait
-                    // i.e. small trick here data validity is encoded in VirtId
-                    // TODO: Must be change with HIS3.0
-                    if op_impl.hid == hpu_asm::VirtId(0) {
-                        // No data, only wait on event
-                        self.wait_received(&var_mode).await;
-                    } else {
-                        // wait event and data
-                        self.wait_resolved(&var_mode).await;
+                    // i.e. data validity is encoded by the presence of a slot
+                    match slot {
+                        None => {
+                            // No data, only wait on event
+                            self.wait_received(&var_mode).await;
+                        }
+                        Some(_) => {
+                            // wait event and data
+                            self.wait_resolved(&var_mode).await;
+                        }
                     }
                     None
                 }
-                hpu_asm::DOp::LD_B2B(hpu_asm::dop::DOpLdB2B(op_impl)) => {
+                DopInstructionSet::LD_B2B { flag, slot } => {
                     //1. Construct mode
-                    let raw_cid = match op_impl.slot {
-                        hpu_asm::MemId::Addr(ct_id) => ct_id,
-                        hpu_asm::MemId::Heap { bid } => hpu_asm::CtId(
-                            (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1)
-                                as u16
-                                - bid,
-                        ),
-
-                        _ => panic!("Unsupported Ucore memory mode"),
-                    };
+                    let raw_cid = self.ctmem_to_cid(*slot);
                     let var_mode = VarMode::User {
                         iid: iop.get_iid(),
-                        flag: op_impl.flag,
+                        flag: *flag,
                     };
 
                     //2. Issue request
@@ -1460,90 +1486,24 @@ impl UCore {
                     let mut dop_patch = dop.clone();
                     match &mut dop_patch {
                         // Patching and deferred execution
-                        // LD/ST patching
-                        // Do MemId template resolution
+                        // Do CtMem template resolution
                         // Warn: With Multi-Hpu support Src/Dst could be located on another Hpu
-                        hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
-                        | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => {
-                            inner.slot = match inner.slot {
-                                hpu_asm::MemId::Heap { bid } => {
-                                    hpu_asm::MemId::Addr(hpu_asm::CtId(
-                                        (self.params.ct_user
-                                            + self.params.ct_b2b
-                                            + self.params.ct_heap
-                                            - 1) as u16
-                                            - bid,
-                                    ))
-                                }
-                                hpu_asm::MemId::Src { tid, bid } => {
-                                    let operand = iop.src()[tid as usize];
-                                    let op_cid =
-                                        hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
-                                    if operand.props.pos.0 == hid {
-                                        // Local access -> Usual patching
-                                        hpu_asm::MemId::Addr(op_cid)
-                                    } else {
-                                        // Remote access
-                                        let var_mode = VarMode::ArgSrc { var: tid, blk: bid };
-
-                                        // Issue request
-                                        self.ld_b2b(var_mode, None).await;
-
-                                        // Wait for resolution (i.e. Dma read finished)
-                                        let cid = self.get_resolved(&var_mode).await;
-                                        hpu_asm::MemId::Addr(cid)
-                                    }
-                                }
-                                hpu_asm::MemId::Dst { tid, bid } => {
-                                    let mut inner = self.inner.lock().unwrap();
-                                    let operand = iop.dst()[tid as usize];
-                                    let cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
-
-                                    let op_cid = if operand.props.pos.0
-                                        == inner
-                                            .config
-                                            .get()
-                                            .expect("UcoreConfig must be init first")
-                                            .node_id
-                                    {
-                                        // Local access -> Usual patching
-                                        // Update dst_store accordingly (i.e. toggle to receive to store the fact that value is locally generated)
-                                        // Also removed associated DstLdOrder in the queue
-                                        inner.dst_store[&(iop_id, tid, bid)] =
-                                            DstVarState::Resolved;
-                                        cid
-                                    } else {
-                                        // Remote access
-                                        // Register in DstNotifyQ for later notify
-                                        // TODO Check that not already present or enforce single access by compiler rules ?!
-                                        // Allocate temporary value in the B2B_pool
-                                        let local_cid = inner.b2b_pool.get_tagged(iop.get_iid());
-
-                                        // Create associated entry.
-                                        // NB: only occurred for remote access case (i.e. no direct deletion afterward)
-                                        let order = DstNotifyOrder {
-                                            var: tid,
-                                            blk: bid,
-                                            trgt_hid: operand.props.pos,
-                                            trgt_cid: cid,
-                                            local_cid,
-                                        };
-                                        inner.dst_notifyq.back_mut().expect("notifyq must have been register during context init").push(order);
-                                        local_cid
-                                    };
-
-                                    hpu_asm::MemId::Addr(op_cid)
-                                }
-                                hpu_asm::MemId::Addr(ct_id) => hpu_asm::MemId::Addr(ct_id),
-                            };
+                        DopInstructionSet::LD { src, .. } => {
+                            let resolved = self.resolve_slot(iop, iop_id, hid, *src).await;
+                            *src = resolved;
+                            Some(dop_patch)
+                        }
+                        DopInstructionSet::ST { dst, .. } => {
+                            let resolved = self.resolve_slot(iop, iop_id, hid, *dst).await;
+                            *dst = resolved;
                             Some(dop_patch)
                         }
                         // Immediate patching
-                        hpu_asm::DOp::ADDS(hpu_asm::dop::DOpAdds(inner))
-                        | hpu_asm::DOp::SUBS(hpu_asm::dop::DOpSubs(inner))
-                        | hpu_asm::DOp::SSUB(hpu_asm::dop::DOpSsub(inner))
-                        | hpu_asm::DOp::MULS(hpu_asm::dop::DOpMuls(inner)) => {
-                            Self::patch_imm(iop, &mut inner.msg_cst);
+                        DopInstructionSet::ADDS { cst, .. }
+                        | DopInstructionSet::SUBS { cst, .. }
+                        | DopInstructionSet::SSUB { cst, .. }
+                        | DopInstructionSet::MULS { cst, .. } => {
+                            Self::patch_imm(iop, cst);
                             Some(dop_patch)
                         }
                         // Deferred execution
@@ -1565,11 +1525,107 @@ impl UCore {
         }
 
         // Ucore is in charge of Sync insertion
-        let sync_dop = hpu_asm::dop::DOpSync::new(iop.get_iid(), None).into();
+        let sync_dop = DopInstructionSet::SYNC {
+            is_inner: false,
+            flag: Default::default(),
+            hid: Default::default(),
+            iid: iop_id.0,
+        };
         let sync_dop_pkt = Packet::wrap_payload(DOpPayload::new(sync_dop), Default::default());
         self.hpu_dop.tx().send_pkt(sync_dop_pkt).await?;
         log!(|self| log::Category::Own, log::Verbosity::Trace => iop => "IOp translated and deferred to Hpu");
         Ok(())
+    }
+
+    /// Resolve a `CtMem` slot into its absolute `Io` address, patching templates against the
+    /// current IOp context (heap slots, and Src/Dst variables possibly located on another node).
+    async fn resolve_slot(
+        &self,
+        iop: &hpu_asm::IOp,
+        iop_id: hpu_asm::IOpId,
+        hid: u8,
+        slot: CtMem,
+    ) -> CtMem {
+        match slot {
+            CtMem::Heap(CtHeap { addr: bid }) => CtMem::Io(CtIo {
+                addr: (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1) as u16
+                    - bid,
+            }),
+            CtMem::Src(CtSrcVar { id: tid, block: bid }) => {
+                let operand = iop.src()[tid as usize];
+                let op_cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
+                if operand.props.pos.0 == hid {
+                    // Local access -> Usual patching
+                    CtMem::Io(CtIo { addr: op_cid.0 })
+                } else {
+                    // Remote access
+                    let var_mode = VarMode::ArgSrc { var: tid, blk: bid };
+
+                    // Issue request
+                    self.ld_b2b(var_mode, None).await;
+
+                    // Wait for resolution (i.e. Dma read finished)
+                    let cid = self.get_resolved(&var_mode).await;
+                    CtMem::Io(CtIo { addr: cid.0 })
+                }
+            }
+            CtMem::Dst(CtDstVar { id: tid, block: bid }) => {
+                let mut inner = self.inner.lock().unwrap();
+                let operand = iop.dst()[tid as usize];
+                let cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
+
+                let op_cid = if operand.props.pos.0
+                    == inner
+                        .config
+                        .get()
+                        .expect("UcoreConfig must be init first")
+                        .node_id
+                {
+                    // Local access -> Usual patching
+                    // Update dst_store accordingly (i.e. toggle to receive to store the fact that value is locally generated)
+                    // Also removed associated DstLdOrder in the queue
+                    inner.dst_store[&(iop_id, tid, bid)] = DstVarState::Resolved;
+                    cid
+                } else {
+                    // Remote access
+                    // Register in DstNotifyQ for later notify
+                    // TODO Check that not already present or enforce single access by compiler rules ?!
+                    // Allocate temporary value in the B2B_pool
+                    let local_cid = inner.b2b_pool.get_tagged(iop.get_iid());
+
+                    // Create associated entry.
+                    // NB: only occurred for remote access case (i.e. no direct deletion afterward)
+                    let order = DstNotifyOrder {
+                        var: tid,
+                        blk: bid,
+                        trgt_hid: operand.props.pos,
+                        trgt_cid: cid,
+                        local_cid,
+                    };
+                    inner
+                        .dst_notifyq
+                        .back_mut()
+                        .expect("notifyq must have been register during context init")
+                        .push(order);
+                    local_cid
+                };
+
+                CtMem::Io(CtIo { addr: op_cid.0 })
+            }
+            CtMem::Io(io) => CtMem::Io(io),
+        }
+    }
+
+    /// Convert a non-templated `CtMem` slot (as carried by `NOTIFY`/`LD_B2B`) into an absolute
+    /// ciphertext id.
+    fn ctmem_to_cid(&self, slot: CtMem) -> hpu_asm::CtId {
+        match slot {
+            CtMem::Io(CtIo { addr }) => hpu_asm::CtId(addr),
+            CtMem::Heap(CtHeap { addr: bid }) => hpu_asm::CtId(
+                (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1) as u16 - bid,
+            ),
+            _ => panic!("Unsupported Ucore memory mode"),
+        }
     }
 
     /// Wait an event to be received
@@ -1879,8 +1935,8 @@ impl UCore {
                      trgt_hid,
                      local_cid,
                  }| {
-                    let ucore_pld = hpu_asm::UcorePayload {
-                        mode: hpu_asm::UcorePayloadMode::Ucore(hpu_asm::UcoreFlag {
+                    let ucore_pld = UcorePayload {
+                        mode: UcorePayloadMode::Ucore(UcoreFlag {
                             tid: var,
                             bid: blk,
                             trgt_cid,
@@ -1961,12 +2017,12 @@ impl UCore {
                 .node_mask
         };
 
-        let notify_order = (0..hpu_asm::dop::MAX_HPU_IN_CLUSTER as u8)
+        let notify_order = (0..hpu_asm::MAX_HPU_IN_CLUSTER as u8)
             .filter(|n| ((node_mask >> (*n as usize)) & 0x1) == 0x1)
             .filter(|n| *n != node_id.0)
             .map(|n| {
-                let ucore_pld = hpu_asm::UcorePayload {
-                    mode: hpu_asm::UcorePayloadMode::IOpDone(iop_nodes),
+                let ucore_pld = UcorePayload {
+                    mode: UcorePayloadMode::IOpDone(iop_nodes),
                     slot: None,
                     from_hid: node_id,
                     iid,
@@ -1993,7 +2049,7 @@ impl UCore {
         Ok(())
     }
 
-    async fn ackq_push(&self, iop_header_hex: hpu_asm::iop::IOpWordRepr) {
+    async fn ackq_push(&self, iop_header_hex: hpu_asm::IOpWordRepr) {
         let QueueConfig {
             head_ofst,
             tail_ofst,
@@ -2118,18 +2174,21 @@ impl UCore {
             "{}/dop/dop_executed_{iopcode:0>2x}.asm",
             trace_path.to_str().unwrap()
         );
-        let hex_p = format!(
-            "{}/dop/dop_executed_{iopcode:0>2x}.hex",
-            trace_path.to_str().unwrap()
-        );
-        let dop_prog = hpu_asm::Program::new(
-            pld.exec_order
-                .iter()
-                .map(|op| hpu_asm::AsmOp::Stmt(op.clone()))
-                .collect::<Vec<_>>(),
-        );
-        dop_prog.write_asm(&asm_p).unwrap();
-        dop_prog.write_hex(&hex_p).unwrap();
+        // NB: unlike IOp, DOp no longer has a standalone hex encoding (`zhc_pipeline`'s
+        // translation-table encoder operates over a whole IR, not a single instruction) so only
+        // the asm view is dumped here.
+        if let Some(dir_p) = std::path::Path::new(&asm_p).parent() {
+            std::fs::create_dir_all(dir_p).unwrap();
+        }
+        let mut dop_asm_f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&asm_p)
+            .expect("Error: Unable to open dop asm dump file");
+        for op in pld.exec_order.iter() {
+            writeln!(dop_asm_f, "{op}").expect("Error: Unable to write dop asm dump file");
+        }
 
         // TODO add other report
     }

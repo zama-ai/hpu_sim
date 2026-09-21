@@ -6,11 +6,11 @@
 //! WARN: User must start the HpuSim binary before tfhe-rs application
 
 use hpu_sim::{
-    cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams},
+    cpn::{HpuCoreParams, HpuNode, HpuNodeParams, RegmapParams, UCoreParams, UcorePayload},
     params::{ComputeParamsName, PerfParamsName},
 };
 use ra2m::prelude::*;
-use tfhe::tfhe_hpu_backend::{asm::dop::UcorePayload, prelude::*};
+use tfhe::tfhe_hpu_backend::prelude::*;
 
 static OUTPUT_FOLDER: &str = "/tmp/hpu_sim";
 

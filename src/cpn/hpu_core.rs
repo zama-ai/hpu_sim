@@ -7,7 +7,6 @@ use zhc::sim::hpu as hpu_sim;
 pub use zhc::sim::hpu::IscCommand;
 use zhc::sim::{Dispatch, Simulatable, Tracer};
 
-use tfhe::tfhe_hpu_backend::asm::PbsLut;
 use tfhe::tfhe_hpu_backend::interface::io_dump::HexMem;
 use tfhe::tfhe_hpu_backend::prelude::*;
 
@@ -15,7 +14,7 @@ use super::{DOpPayload, IOpPayload};
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use hpu_asm::ToHex;
+use zhc::langs::doplang::{CtMem, CtReg, DopInstructionSet, PtArg};
 
 /// HpuCore parameters
 #[derive(Debug, Clone)]
@@ -322,9 +321,11 @@ impl HpuCore {
                                         issue_lock: props.issue_lock as u8,
                                         sync_id: 0, // TODO add proper sync_id tracking
                                     },
-                                    insn_hex: dop.inner.to_hex(),
-                                    insn: None,
-                                    insn_asm: None,
+                                    // NB: DOp no longer has a standalone hex encoding (see the
+                                    // comment on the dop asm dump in `ucore.rs`), so only the
+                                    // asm view is available for tracing here.
+                                    insn_hex: 0,
+                                    insn_asm: Some(dop.inner.to_string()),
                                     timestamp: usize::from(
                                         self.props.clock_domain().from_tick(cur_tick()),
                                     ) as u32,
@@ -430,7 +431,6 @@ use tfhe::core_crypto::entities::{
     Cleartext, LweCiphertextOwned, LweCiphertextView, LweKeyswitchKey, NttLweBootstrapKey,
     Plaintext,
 };
-use tfhe::core_crypto::hpu::glwe_lookuptable::create_hpu_lookuptable;
 use tfhe::core_crypto::prelude::*;
 use tfhe::shortint::parameters::KeySwitch32PBSParameters;
 
@@ -453,9 +453,9 @@ impl HpuCore {
         self.trivial_decode(body)
     }
 
-    fn show_trivial_reg(&self, reg_id: hpu_asm::RegId) {
+    fn show_trivial_reg(&self, reg_id: CtReg) {
         let inner = self.inner.lock().unwrap();
-        let ct = &inner.regfile[reg_id.0 as usize].as_view();
+        let ct = &inner.regfile[reg_id.addr as usize].as_view();
         let trivial = self.as_trivial::<u64>(ct);
         log!(|self| log::Category::Own, log::Verbosity::Debug => reg_id, trivial);
     }
@@ -483,13 +483,16 @@ impl HpuCore {
 
         // Read operands
         match &dop_inner {
-            hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_) => {
+            DopInstructionSet::LD_B2B { .. }
+            | DopInstructionSet::WAIT { .. }
+            | DopInstructionSet::NOTIFY { .. } => {
                 panic!("Error: DOp {dop_inner:?} must have been handled by Ucore")
             }
-            hpu_asm::DOp::SYNC(_) => {}
-            hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(insn)) => {
-                let cid_ofst = match insn.slot {
-                    hpu_asm::MemId::Addr(ct_id) => ct_id,
+            DopInstructionSet::_START | DopInstructionSet::_END => {}
+            DopInstructionSet::SYNC { .. } => {}
+            DopInstructionSet::LD { dst, src } => {
+                let cid_ofst = match src {
+                    CtMem::Io(io) => hpu_asm::CtId(io.addr),
                     _ => panic!("Template must have been resolved before execution"),
                 };
 
@@ -522,10 +525,10 @@ impl HpuCore {
                 // across await points
                 {
                     let mut inner = self.inner.lock().unwrap();
-                    let dst = &mut inner.regfile[insn.rid.0 as usize];
+                    let regf_dst = &mut inner.regfile[dst.addr as usize];
 
                     for (hpu_slice, mem_slice) in
-                        std::iter::zip(dst.as_mut_view().into_container(), ct_mem)
+                        std::iter::zip(regf_dst.as_mut_view().into_container(), ct_mem)
                     {
                         // NB: Chunk are extended to enforce page align buffer
                         // -> To prevent error during copy, with shrink the mem buffer to
@@ -536,21 +539,21 @@ impl HpuCore {
                         hpu_slice.clone_from_slice(data_u64);
                     }
                 }
-                self.show_trivial_reg(insn.rid);
+                self.show_trivial_reg(*dst);
             }
 
-            hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(insn)) => {
+            DopInstructionSet::ST { dst, src } => {
                 //1. Read data inside regfile
                 // NB: Don't do both at same time (i.e. read in regfile and write in memory) to prevent having a Mutex lock
                 // across await points
                 // TODO prevent cloning ?!
-                let src = {
+                let src_ct = {
                     let inner = self.inner.lock().unwrap();
-                    inner.regfile[insn.rid.0 as usize].clone()
+                    inner.regfile[src.addr as usize].clone()
                 };
 
-                let cid_ofst = match insn.slot {
-                    hpu_asm::MemId::Addr(ct_id) => ct_id,
+                let cid_ofst = match dst {
+                    CtMem::Io(io) => hpu_asm::CtId(io.addr),
                     _ => panic!("Template must have been resolved before execution"),
                 };
 
@@ -559,7 +562,9 @@ impl HpuCore {
                 //2. Built request and write data in memory
                 // FIXME: check behavior of b_req_resp_burst cf Ra2m doc
                 // -> Use burst instead of two separate requests
-                for (hpu_slice, addr) in std::iter::zip(src.as_view().into_container(), ct_addrs) {
+                for (hpu_slice, addr) in
+                    std::iter::zip(src_ct.as_view().into_container(), ct_addrs)
+                {
                     let data_u8 = bytemuck::cast_slice::<u64, u8>(hpu_slice);
 
                     let mem_req = membus::MemBus::new_wrapped(
@@ -573,148 +578,146 @@ impl HpuCore {
 
                     self.mem.b_req_resp(mem_req).await?;
                 }
-                self.show_trivial_reg(insn.rid);
+                self.show_trivial_reg(*src);
             }
 
-            hpu_asm::DOp::ADD(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src0_rid);
-                self.show_trivial_reg(op_impl.0.src1_rid);
+            DopInstructionSet::ADD { dst, src1, src2 } => {
+                self.show_trivial_reg(*src1);
+                self.show_trivial_reg(*src2);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src0_rid);
-                let cpu_s1 = self.reg2cpu(op_impl.0.src1_rid);
+                let mut cpu_s0 = self.reg2cpu(*src1);
+                let cpu_s1 = self.reg2cpu(*src2);
                 lwe_ciphertext_add_assign(&mut cpu_s0, &cpu_s1);
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::SUB(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src0_rid);
-                self.show_trivial_reg(op_impl.0.src1_rid);
+            DopInstructionSet::SUB { dst, src1, src2 } => {
+                self.show_trivial_reg(*src1);
+                self.show_trivial_reg(*src2);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src0_rid);
-                let cpu_s1 = self.reg2cpu(op_impl.0.src1_rid);
+                let mut cpu_s0 = self.reg2cpu(*src1);
+                let cpu_s1 = self.reg2cpu(*src2);
                 lwe_ciphertext_sub_assign(&mut cpu_s0, &cpu_s1);
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::MAC(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src0_rid);
-                self.show_trivial_reg(op_impl.0.src1_rid);
+            DopInstructionSet::MAC {
+                dst,
+                src1,
+                src2,
+                cst,
+            } => {
+                self.show_trivial_reg(*src1);
+                self.show_trivial_reg(*src2);
 
                 // NB: Srcs are used as destination to prevent useless allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src0_rid);
-                let cpu_s1 = self.reg2cpu(op_impl.0.src1_rid);
+                let mut cpu_s0 = self.reg2cpu(*src1);
+                let cpu_s1 = self.reg2cpu(*src2);
 
-                lwe_ciphertext_cleartext_mul_assign(
-                    &mut cpu_s0,
-                    Cleartext(op_impl.0.mul_factor.0 as u64),
-                );
+                let mul_factor = match cst {
+                    PtArg::Const(cst) => cst.val,
+                    PtArg::Var(_) => panic!("Template must have been resolved before execution"),
+                };
+                lwe_ciphertext_cleartext_mul_assign(&mut cpu_s0, Cleartext(mul_factor as u64));
                 lwe_ciphertext_add_assign(&mut cpu_s0, &cpu_s1);
 
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::ADDS(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src_rid);
+            DopInstructionSet::ADDS { dst, src, cst } => {
+                self.show_trivial_reg(*src);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src_rid);
-                let msg_cst = match op_impl.0.msg_cst {
-                    hpu_asm::ImmId::Cst(cst) => cst as u64,
-                    _ => panic!("Template must have been resolved before execution"),
+                let mut cpu_s0 = self.reg2cpu(*src);
+                let msg_cst = match cst {
+                    PtArg::Const(cst) => cst.val as u64,
+                    PtArg::Var(_) => panic!("Template must have been resolved before execution"),
                 };
                 let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_add_assign(&mut cpu_s0, Plaintext(msg_encoded));
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::SUBS(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src_rid);
+            DopInstructionSet::SUBS { dst, src, cst } => {
+                self.show_trivial_reg(*src);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src_rid);
-                let msg_cst = match op_impl.0.msg_cst {
-                    hpu_asm::ImmId::Cst(cst) => cst as u64,
-                    _ => panic!("Template must have been resolved before execution"),
+                let mut cpu_s0 = self.reg2cpu(*src);
+                let msg_cst = match cst {
+                    PtArg::Const(cst) => cst.val as u64,
+                    PtArg::Var(_) => panic!("Template must have been resolved before execution"),
                 };
                 let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_sub_assign(&mut cpu_s0, Plaintext(msg_encoded));
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::SSUB(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src_rid);
+            DopInstructionSet::SSUB { dst, src, cst } => {
+                self.show_trivial_reg(*src);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src_rid);
+                let mut cpu_s0 = self.reg2cpu(*src);
                 lwe_ciphertext_opposite_assign(&mut cpu_s0);
-                let msg_cst = match op_impl.0.msg_cst {
-                    hpu_asm::ImmId::Cst(cst) => cst as u64,
-                    _ => panic!("Template must have been resolved before execution"),
+                let msg_cst = match cst {
+                    PtArg::Const(cst) => cst.val as u64,
+                    PtArg::Var(_) => panic!("Template must have been resolved before execution"),
                 };
                 let msg_encoded = msg_cst * self.params.compute_params.pbs_params.delta();
                 lwe_ciphertext_plaintext_add_assign(&mut cpu_s0, Plaintext(msg_encoded));
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::MULS(op_impl) => {
-                self.show_trivial_reg(op_impl.0.src_rid);
+            DopInstructionSet::MULS { dst, src, cst } => {
+                self.show_trivial_reg(*src);
 
                 // NB: The first src is used as destination to prevent useless
                 // allocation
-                let mut cpu_s0 = self.reg2cpu(op_impl.0.src_rid);
-                let msg_cst = match op_impl.0.msg_cst {
-                    hpu_asm::ImmId::Cst(cst) => cst as u64,
-                    _ => panic!("Template must have been resolved before execution"),
+                let mut cpu_s0 = self.reg2cpu(*src);
+                let msg_cst = match cst {
+                    PtArg::Const(cst) => cst.val as u64,
+                    PtArg::Var(_) => panic!("Template must have been resolved before execution"),
                 };
                 lwe_ciphertext_cleartext_mul_assign(&mut cpu_s0, Cleartext(msg_cst));
-                self.cpu2reg(op_impl.0.dst_rid, cpu_s0.as_view());
+                self.cpu2reg(*dst, cpu_s0.as_view());
 
-                self.show_trivial_reg(op_impl.0.dst_rid);
+                self.show_trivial_reg(*dst);
             }
-            hpu_asm::DOp::PBS(op_impl) => {
-                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS { dst, src, lut } => {
+                self.apply_pbs2reg(1, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML2(op_impl) => {
-                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML2 { dst, src, lut } => {
+                self.apply_pbs2reg(2, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML4(op_impl) => {
-                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML4 { dst, src, lut } => {
+                self.apply_pbs2reg(4, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML8(op_impl) => {
-                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML8 { dst, src, lut } => {
+                self.apply_pbs2reg(8, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_F(op_impl) => {
-                self.apply_pbs2reg(1, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_F { dst, src, lut } => {
+                self.apply_pbs2reg(1, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML2_F(op_impl) => {
-                self.apply_pbs2reg(2, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML2_F { dst, src, lut } => {
+                self.apply_pbs2reg(2, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML4_F(op_impl) => {
-                self.apply_pbs2reg(4, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML4_F { dst, src, lut } => {
+                self.apply_pbs2reg(4, *dst, *src, *lut).await?;
             }
-            hpu_asm::DOp::PBS_ML8_F(op_impl) => {
-                self.apply_pbs2reg(8, op_impl.0.dst_rid, op_impl.0.src_rid, op_impl.0.gid)
-                    .await?;
+            DopInstructionSet::PBS_ML8_F { dst, src, lut } => {
+                self.apply_pbs2reg(8, *dst, *src, *lut).await?;
             }
         }
         // Dump operation src/dst in file if required
@@ -734,9 +737,9 @@ impl HpuCore {
         // Dump DOpPayload to trace
         trace!(|self| trace::Kind::Pipeline => dop);
 
-        if let hpu_asm::DOp::SYNC(op_impl) = &dop.inner {
+        if let DopInstructionSet::SYNC { is_inner, .. } = &dop.inner {
             // Skip report/context update on inner_sync
-            if !op_impl.0.is_inner_sync {
+            if !is_inner {
                 if !matches!(self.params.sim_trace, zhc::sim::TracingLevel::None) {
                     let mut inner = self.inner.lock().unwrap();
                     let HpuCoreInner {
@@ -796,143 +799,36 @@ impl HpuCore {
     /// TODO: Read PbsLut from Hbm instead of online generation based on Pbs Id
     async fn apply_pbs2reg(
         &self,
-        opcode_lut_nb: u8,
-        dst_rid: hpu_asm::RegId,
-        src_rid: hpu_asm::RegId,
-        gid: hpu_asm::PbsGid,
+        _opcode_lut_nb: u8,
+        _dst_rid: CtReg,
+        _src_rid: CtReg,
+        _gid: zhc::langs::doplang::LutRef,
     ) -> Result<(), anyhow::Error> {
-        let mut cpu_reg = self.reg2cpu(src_rid);
-        let lut = hpu_asm::Pbs::from_hex(gid).expect("Invalid PBS Gid");
-        // TODO use an assert or a simple warning
-        // In practice, hardware apply the LUT but extract only opcode_lut_nb Ct
-        assert_eq!(
-            lut.lut_nb(),
-            opcode_lut_nb,
-            "ERROR: Mismatch between PBS ML configuration and selected Lut."
-        );
-
-        assert_eq!(
-            dst_rid.0,
-            (dst_rid.0 >> lut.lut_lg()) << lut.lut_lg(),
-            "Pbs destination register must be aligned with lut size"
-        );
-
-        // Generate Lut
-        let hpu_lut = create_hpu_lookuptable(&self.params.compute_params, &lut);
-        let tfhe_lut = GlweCiphertext::from(hpu_lut.as_view());
-
-        // Compute Lut properties
-        let (modulus_sup, box_size, fn_stride) = {
-            let pbs_p = &self.params.compute_params.pbs_params;
-            let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
-            let box_size = pbs_p.polynomial_size / modulus_sup;
-            // Max valid degree for a ciphertext when using the LUT we generate
-            // If MaxDegree == 1, we can have two input values 0 and 1, so we need MaxDegree + 1
-            // boxes
-            let max_degree = modulus_sup / lut.lut_nb() as usize;
-            let fn_stride = max_degree * box_size;
-            (modulus_sup, box_size, fn_stride)
-        };
-
-        if self.params.trivial {
-            self.show_trivial_reg(src_rid);
-
-            let ct_value = self.trivial_decode(*cpu_reg.get_body().data) as usize;
-            let padding_bit_set = ct_value >= modulus_sup;
-            let first_index_in_lut = {
-                let ct_value = ct_value % modulus_sup;
-                ct_value * box_size
-            };
-
-            for fn_idx in 0..lut.lut_nb() as usize {
-                let (index_in_lut, wrap_around_negation) = {
-                    let raw_index = first_index_in_lut + fn_idx * fn_stride;
-                    let wrap_around = raw_index / tfhe_lut.polynomial_size().0;
-                    (
-                        raw_index % tfhe_lut.polynomial_size().0,
-                        (wrap_around % 2) == 1,
-                    )
-                };
-                let pbs_out = if padding_bit_set ^ wrap_around_negation {
-                    tfhe_lut.get_body().as_ref()[index_in_lut].wrapping_neg()
-                } else {
-                    tfhe_lut.get_body().as_ref()[index_in_lut]
-                };
-
-                *cpu_reg.get_mut_body().data = pbs_out;
-
-                let manylut_rid = hpu_asm::RegId(dst_rid.0 + fn_idx as u8);
-                self.cpu2reg(manylut_rid, cpu_reg.as_view());
-                self.show_trivial_reg(manylut_rid);
-            }
-        } else {
-            let mut tfhe_lut = tfhe_lut;
-            self.with_server_key(|ksk, bfr_after_ks, bsk| {
-                keyswitch_lwe_ciphertext_with_scalar_change(ksk, &cpu_reg, bfr_after_ks);
-
-                let modulus_switch_type = self.params.compute_params.pbs_params.modulus_switch_type;
-
-                let log_modulus = bsk.polynomial_size().to_blind_rotation_input_modulus_log();
-                let bfr_after_ms = match modulus_switch_type {
-                    HpuModulusSwitchType::Standard => {
-                        lwe_ciphertext_modulus_switch(bfr_after_ks.as_view(), log_modulus)
-                    }
-                    HpuModulusSwitchType::CenteredMeanNoiseReduction => {
-                        lwe_ciphertext_centered_binary_modulus_switch(
-                            bfr_after_ks.as_view(),
-                            log_modulus,
-                        )
-                    }
-                };
-                blind_rotate_ntt64_bnf_assign(&bfr_after_ms, &mut tfhe_lut, bsk);
-            })
-            .await?;
-
-            assert_eq!(
-                dst_rid.0,
-                (dst_rid.0 >> lut.lut_lg()) << lut.lut_lg(),
-                "Pbs destination register must be aligned with lut size"
-            );
-
-            // Compute ManyLut function stride
-            let fn_stride = {
-                let pbs_p = &self.params.compute_params.pbs_params;
-                let modulus_sup = 1_usize << (pbs_p.message_width + pbs_p.carry_width);
-                let box_size = pbs_p.polynomial_size / modulus_sup;
-                // Max valid degree for a ciphertext when using the LUT we generate
-                // If MaxDegree == 1, we can have two input values 0 and 1, so we need MaxDegree + 1
-                // boxes
-                let max_degree = modulus_sup / lut.lut_nb() as usize;
-                max_degree * box_size
-            };
-
-            for fn_idx in 0..lut.lut_nb() as usize {
-                let monomial_degree = MonomialDegree(fn_idx * fn_stride);
-                extract_lwe_sample_from_glwe_ciphertext(&tfhe_lut, &mut cpu_reg, monomial_degree);
-                let manylut_rid = hpu_asm::RegId(dst_rid.0 + fn_idx as u8);
-                self.cpu2reg(manylut_rid, cpu_reg.as_view());
-            }
-        }
-        Ok(())
+        // TODO: The fixed `Pbs`/`PbsLut` enum this used to decode `gid` analytically was removed
+        // from tfhe-hpu-backend when DOp definitions moved to zhc; LUT content now lives in a
+        // runtime `LutRegistry` uploaded into HBM/DDR (see `interface/cache/lut.rs`), which
+        // hpu_sim has no equivalent memory channel or upload path for yet. Left as a stub
+        // pending that infrastructure (deliberately deferred, see PR discussion).
+        todo!("PBS LUT content resolution: needs a simulated lut_pc memory channel + upload path")
     }
 
     // NB: to prevent issues with borrow checker we have to clone the value from
     // the regfile. A clone is also required for conversion
     // Thus, directly cast value in Cpu version to prevent extra clone
     /// Extract a cpu value from register file
-    fn reg2cpu(&self, reg_id: hpu_asm::RegId) -> LweCiphertextOwned<u64> {
+    fn reg2cpu(&self, reg_id: CtReg) -> LweCiphertextOwned<u64> {
         let inner = self.inner.lock().unwrap();
-        let reg = inner.regfile[reg_id.0 as usize].as_view();
+        let reg = inner.regfile[reg_id.addr as usize].as_view();
         LweCiphertextOwned::from(reg)
     }
 
     /// Insert a cpu value into the register file
-    fn cpu2reg(&self, reg_id: hpu_asm::RegId, cpu: LweCiphertextView<u64>) {
+    fn cpu2reg(&self, reg_id: CtReg, cpu: LweCiphertextView<u64>) {
         let mut inner = self.inner.lock().unwrap();
         let hpu =
             HpuLweCiphertextOwned::<u64>::create_from(cpu, self.params.compute_params.clone());
         std::iter::zip(
-            inner.regfile[reg_id.0 as usize]
+            inner.regfile[reg_id.addr as usize]
                 .as_mut_view()
                 .into_container(),
             hpu.into_container(),
@@ -1123,7 +1019,7 @@ impl HpuCore {
 }
 
 impl HpuCore {
-    fn dump_op_reg(&self, op: &hpu_asm::DOp) {
+    fn dump_op_reg(&self, op: &DopInstructionSet) {
         if self.params.dump_reg {
             // Create folder-path
             let trace_folder = Output::get_trace_folder();
@@ -1131,23 +1027,23 @@ impl HpuCore {
 
             // Dump register value
             let regid = match op {
-                hpu_asm::DOp::LD(hpu_asm::dop::DOpLd(inner))
-                | hpu_asm::DOp::ST(hpu_asm::dop::DOpSt(inner)) => inner.rid.0 as usize,
-                hpu_asm::DOp::ADDS(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::SUBS(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::SSUB(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::MULS(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::ADD(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::SUB(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::MAC(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML2(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML4(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML8(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML2_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML4_F(op_impl) => op_impl.0.dst_rid.0 as usize,
-                hpu_asm::DOp::PBS_ML8_F(op_impl) => op_impl.0.dst_rid.0 as usize,
+                DopInstructionSet::LD { dst, .. } => dst.addr as usize,
+                DopInstructionSet::ST { src, .. } => src.addr as usize,
+                DopInstructionSet::ADDS { dst, .. } => dst.addr as usize,
+                DopInstructionSet::SUBS { dst, .. } => dst.addr as usize,
+                DopInstructionSet::SSUB { dst, .. } => dst.addr as usize,
+                DopInstructionSet::MULS { dst, .. } => dst.addr as usize,
+                DopInstructionSet::ADD { dst, .. } => dst.addr as usize,
+                DopInstructionSet::SUB { dst, .. } => dst.addr as usize,
+                DopInstructionSet::MAC { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML2 { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML4 { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML8 { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_F { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML2_F { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML4_F { dst, .. } => dst.addr as usize,
+                DopInstructionSet::PBS_ML8_F { dst, .. } => dst.addr as usize,
                 _ => return,
             };
             {
@@ -1286,239 +1182,22 @@ impl<E: zhc::sim::Event> zhc::sim::Dispatch for HpuEventStore<E> {
     }
 }
 
-// Convert tfhe-rs::DOp in zhc::sim::DOp
+// Convert zhc DOp representation to zhc::sim::DOp (its perf/scheduling model)
 // Required current hpu_core context for DOpId extraction
-fn into_compiler_view(pc: usize, asm_dop: &hpu_asm::DOp) -> hpu_sim::DOp {
-    use hpu_sim::{DOp, DOpId, RawDOp};
-    use zhc::langs::doplang::{Argument, MASK_NONE, MASK_PBS2, MASK_PBS4, MASK_PBS8};
-
-    let id = DOpId(pc);
-    let raw = match asm_dop {
-        hpu_asm::DOp::ADD(inner) => RawDOp::ADD {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src1: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src0_rid.0 as usize,
-            },
-            src2: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src1_rid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::SUB(inner) => RawDOp::SUB {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src1: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src0_rid.0 as usize,
-            },
-            src2: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src1_rid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::MAC(inner) => RawDOp::MAC {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src1: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src0_rid.0 as usize,
-            },
-            src2: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src1_rid.0 as usize,
-            },
-            cst: Argument::PtConst {
-                val: inner.0.mul_factor.0,
-            },
-        },
-        hpu_asm::DOp::ADDS(inner) => RawDOp::ADDS {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as u8,
-            },
-        },
-        hpu_asm::DOp::SUBS(inner) => RawDOp::SUBS {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as u8,
-            },
-        },
-        hpu_asm::DOp::SSUB(inner) => RawDOp::SSUB {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as u8,
-            },
-        },
-        hpu_asm::DOp::MULS(inner) => RawDOp::MULS {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            cst: Argument::PtConst {
-                val: inner.0.msg_cst.unwrap_cst() as u8,
-            },
-        },
-        hpu_asm::DOp::LD(inner) => RawDOp::LD {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.rid.0 as usize,
-            },
-            src: Argument::CtIo {
-                addr: inner.0.slot.unwrap_addr() as usize,
-            },
-        },
-        hpu_asm::DOp::ST(inner) => RawDOp::ST {
-            dst: Argument::CtIo {
-                addr: inner.0.slot.unwrap_addr() as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.rid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::SYNC(_inner) => RawDOp::SYNC,
-        hpu_asm::DOp::PBS(inner) => RawDOp::PBS {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_F(inner) => RawDOp::PBS_F {
-            dst: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_NONE,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML2(inner) => RawDOp::PBS_ML2 {
-            dst: Argument::CtReg {
-                mask: MASK_PBS2,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS2,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML2_F(inner) => RawDOp::PBS_ML2_F {
-            dst: Argument::CtReg {
-                mask: MASK_PBS2,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS2,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML4(inner) => RawDOp::PBS_ML4 {
-            dst: Argument::CtReg {
-                mask: MASK_PBS4,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS4,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML4_F(inner) => RawDOp::PBS_ML4_F {
-            dst: Argument::CtReg {
-                mask: MASK_PBS4,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS4,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML8(inner) => RawDOp::PBS_ML8 {
-            dst: Argument::CtReg {
-                mask: MASK_PBS8,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS8,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::PBS_ML8_F(inner) => RawDOp::PBS_ML8_F {
-            dst: Argument::CtReg {
-                mask: MASK_PBS8,
-                addr: inner.0.dst_rid.0 as usize,
-            },
-            src: Argument::CtReg {
-                mask: MASK_PBS8,
-                addr: inner.0.src_rid.0 as usize,
-            },
-            lut: Argument::LutId {
-                id: inner.0.gid.0 as usize,
-            },
-        },
-        hpu_asm::DOp::LD_B2B(_) | hpu_asm::DOp::WAIT(_) | hpu_asm::DOp::NOTIFY(_) => {
-            panic!("Error: DOp {asm_dop:?} must have been handled by Ucore")
-        }
-    };
-    DOp { raw, id }
+fn into_compiler_view(pc: usize, asm_dop: &DopInstructionSet) -> hpu_sim::DOp {
+    debug_assert!(
+        !matches!(
+            asm_dop,
+            DopInstructionSet::LD_B2B { .. }
+                | DopInstructionSet::WAIT { .. }
+                | DopInstructionSet::NOTIFY { .. }
+        ),
+        "Error: DOp {asm_dop:?} must have been handled by Ucore"
+    );
+    hpu_sim::DOp {
+        raw: asm_dop.clone(),
+        id: hpu_sim::DOpId(pc),
+    }
 }
 
 // Utilities function to handle filesystem
