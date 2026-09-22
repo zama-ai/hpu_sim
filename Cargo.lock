@@ -930,9 +930,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
 dependencies = [
  "either",
 ]
@@ -1987,7 +1987,7 @@ dependencies = [
 [[package]]
 name = "tfhe"
 version = "1.8.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "aligned-vec",
  "bincode",
@@ -2013,7 +2013,7 @@ dependencies = [
 [[package]]
 name = "tfhe-csprng"
 version = "0.10.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "aes",
  "getrandom 0.2.17",
@@ -2026,7 +2026,7 @@ dependencies = [
 [[package]]
 name = "tfhe-fft"
 version = "0.10.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2040,7 +2040,7 @@ dependencies = [
 [[package]]
 name = "tfhe-hpu-backend"
 version = "0.7.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2077,7 +2077,7 @@ dependencies = [
 [[package]]
 name = "tfhe-ntt"
 version = "0.7.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2087,7 +2087,7 @@ dependencies = [
 [[package]]
 name = "tfhe-safe-serialize"
 version = "0.1.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "bincode",
  "serde",
@@ -2096,8 +2096,8 @@ dependencies = [
 
 [[package]]
 name = "tfhe-versionable"
-version = "0.8.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+version = "0.8.1"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "aligned-vec",
  "num-complex",
@@ -2107,12 +2107,12 @@ dependencies = [
 
 [[package]]
 name = "tfhe-versionable-derive"
-version = "0.8.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#97d60f9d0b6a432bc73267e8b011c1566cf41af8"
+version = "0.8.1"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2699,8 +2699,9 @@ dependencies = [
 
 [[package]]
 name = "zhc"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89ebe4768c99e5a7ccca54a44f58ecf95910bfd414f80edfad25105666db12f0"
 dependencies = [
  "zhc_builder",
  "zhc_config",
@@ -2714,8 +2715,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_builder"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce84057f08492a82fe92a798e95f7f3297fb4e0f50a18db5cff42f3e7b7a2d11"
 dependencies = [
  "zhc_crypto",
  "zhc_ir",
@@ -2725,8 +2727,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_config"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1271844e0becb778687b4b6f88f0f09252f353373ea208f1c6801709dff3486"
 dependencies = [
  "serde",
  "serde_json",
@@ -2736,8 +2739,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_crypto"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01140e4d118d98742827d722119368dbdda66d5a33ec3ecc8001c52d07bdc136"
 dependencies = [
  "paste",
  "rand 0.10.3",
@@ -2746,8 +2750,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_ir"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf7f7337548923e51cb680582873e126a510649926bc27448b81df91b3186b81"
 dependencies = [
  "serde",
  "zhc_utils",
@@ -2756,8 +2761,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_langs"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d5f88eb424e9a6d1b39b9e2287769f3eb74dc0de8db11befe38787c44edd99"
 dependencies = [
  "serde",
  "zhc_crypto",
@@ -2767,8 +2773,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_pipeline"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d90028569c659d6fd928c5857f125e2de6184c166fa86f9e3070719fd20959d3"
 dependencies = [
  "bitfield-struct 0.10.1",
  "rand 0.10.3",
@@ -2784,13 +2791,15 @@ dependencies = [
 
 [[package]]
 name = "zhc_profiling"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77596dcb567a8a6bcf606cac14ab3d079d6c328dcd9f2c8bed7b36348c26bcd3"
 
 [[package]]
 name = "zhc_sim"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca2f42554d73583fc3cf501eb0d67a3f10a19e8dbaf697497024c9ac0950f11d"
 dependencies = [
  "serde",
  "serde_json",
@@ -2802,8 +2811,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_utils"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfb214debc2e49d3be2c626aeb1ab7a59916978aeebfcfb9f841d6f1ae7f4fe2"
 dependencies = [
  "libc",
  "paste",
@@ -2816,8 +2826,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_utils_macro"
-version = "0.9.1"
-source = "git+https://github.com/zama-ai/zhc.git?branch=br%2Fdyn_iop#02dbf9efbe5b000268bfa1aa306482204347a10f"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c055df1310a5dd2bc6293c82b143ab17187f36bee8f1db81d53d170c1dc3412b"
 dependencies = [
  "proc-macro2",
  "quote",
