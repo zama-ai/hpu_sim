@@ -73,7 +73,6 @@ pub struct UcoreFlag {
     pub trgt_cid: hpu_asm::CtId,
 }
 
-
 // Define a set of constant
 // Use constant instead of parameters to have static allocation of array (and thus mimics real Fw impl)
 /// Maximum number of user event inside an IOp
@@ -100,11 +99,11 @@ const MAX_IID: usize = 1 << 8;
 /// Use to track lifetime of explicit inter-hpu communication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UserVarState {
-    None,                            // Event not received yet
-    ReadPending(hpu_asm::CtId),      // Event not received but read is already pending
-    Received(UcorePayload), // Event received but not handled yet
-    DmaPending(usize),               // Event received and associated dma request already issued
-    Resolved(hpu_asm::CtId),         // Event received and locally resolved in associated mem_id
+    None,                       // Event not received yet
+    ReadPending(hpu_asm::CtId), // Event not received but read is already pending
+    Received(UcorePayload),     // Event received but not handled yet
+    DmaPending(usize),          // Event received and associated dma request already issued
+    Resolved(hpu_asm::CtId),    // Event received and locally resolved in associated mem_id
 }
 
 /// Structure able to store user synchronisation state
@@ -1253,9 +1252,9 @@ impl UCore {
     fn patch_imm(iop: &hpu_asm::IOp, imm: &mut PtArg) {
         *imm = match imm {
             PtArg::Const(cst) => PtArg::Const(*cst),
-            PtArg::Var(PtSrcVar { id, block }) => PtArg::Const(PtConst::new(
-                iop.imm()[*id as usize].msg_block(*block) as u8,
-            )),
+            PtArg::Var(PtSrcVar { id, block }) => {
+                PtArg::Const(PtConst::new(iop.imm()[*id as usize].msg_block(*block) as u8))
+            }
         }
     }
 
@@ -1421,7 +1420,11 @@ impl UCore {
                 // NB: An inner sync is automatically append to the stream to enforce execution of previous Dop before notifying
                 // -> Insert a sync and register notify in the queue. When sync returned, issue associated notify
                 // NB': Sync couldn't be reorder by hpu_core, thus use a simple Fifo for notify bufering
-                DopInstructionSet::NOTIFY { virt_id, flag, slot } => {
+                DopInstructionSet::NOTIFY {
+                    virt_id,
+                    flag,
+                    slot,
+                } => {
                     // Build Ucore payload based on context and current DOp
                     let raw_cid = self.ctmem_to_cid(*slot);
                     let from_hid = hpu_asm::PhysId(hid);
@@ -1551,7 +1554,10 @@ impl UCore {
                 addr: (self.params.ct_user + self.params.ct_b2b + self.params.ct_heap - 1) as u16
                     - bid,
             }),
-            CtMem::Src(CtSrcVar { id: tid, block: bid }) => {
+            CtMem::Src(CtSrcVar {
+                id: tid,
+                block: bid,
+            }) => {
                 let operand = iop.src()[tid as usize];
                 let op_cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
                 if operand.props.pos.0 == hid {
@@ -1569,7 +1575,10 @@ impl UCore {
                     CtMem::Io(CtIo { addr: cid.0 })
                 }
             }
-            CtMem::Dst(CtDstVar { id: tid, block: bid }) => {
+            CtMem::Dst(CtDstVar {
+                id: tid,
+                block: bid,
+            }) => {
                 let mut inner = self.inner.lock().unwrap();
                 let operand = iop.dst()[tid as usize];
                 let cid = hpu_asm::CtId(operand.addr.base_cid.0 + bid as u16);
