@@ -33,12 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -238,9 +232,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
-version = "1.4.7"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54413ede23c2daf518f35156dfde027feb2374004d63bd497f983c8db9c0e313"
+checksum = "207aedd8d29a0eb804986bc99eed0d43719fec84a9b7f9c8b70cf83b97cffcc1"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -597,9 +591,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.13"
+version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef25905e51abafe4dcea6c15fec58c57b601cdbd0ee53d22ea1d3016c587d39b"
+checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fnv"
@@ -775,8 +769,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -945,9 +937,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js-sys"
-version = "0.3.105"
+version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e"
+checksum = "7883d941dae510fb2d978fc3fe018c71c9e2892fd38854de3e8b92c2e5ad9cc5"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -1010,9 +1002,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru"
-version = "0.18.4"
+version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
 dependencies = [
  "hashbrown",
 ]
@@ -1432,7 +1424,7 @@ checksum = "236eb30a5ce96820892d4426c8ba73f7c6ae5631b0c27079eec5e5346cb2e3e4"
 dependencies = [
  "ipc-channel",
  "serde",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1812,9 +1804,9 @@ dependencies = [
 
 [[package]]
 name = "siphasher"
-version = "1.0.3"
+version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "slab"
@@ -1834,9 +1826,9 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
-version = "1.16.1"
+version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "socket2"
@@ -1987,7 +1979,7 @@ dependencies = [
 [[package]]
 name = "tfhe"
 version = "1.8.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "aligned-vec",
  "bincode",
@@ -2013,7 +2005,7 @@ dependencies = [
 [[package]]
 name = "tfhe-csprng"
 version = "0.10.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "aes",
  "getrandom 0.2.17",
@@ -2026,7 +2018,7 @@ dependencies = [
 [[package]]
 name = "tfhe-fft"
 version = "0.10.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2040,7 +2032,7 @@ dependencies = [
 [[package]]
 name = "tfhe-hpu-backend"
 version = "0.7.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2067,7 +2059,7 @@ dependencies = [
  "serde_json",
  "strum 0.26.3",
  "strum_macros 0.26.4",
- "thiserror 2.0.20",
+ "thiserror 2.0.21",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -2077,7 +2069,7 @@ dependencies = [
 [[package]]
 name = "tfhe-ntt"
 version = "0.7.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2087,7 +2079,7 @@ dependencies = [
 [[package]]
 name = "tfhe-safe-serialize"
 version = "0.1.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "bincode",
  "serde",
@@ -2097,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "tfhe-versionable"
 version = "0.8.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "aligned-vec",
  "num-complex",
@@ -2108,7 +2100,7 @@ dependencies = [
 [[package]]
 name = "tfhe-versionable-derive"
 version = "0.8.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#d1bce2858f2117f1d929a2271f1f8b342054311c"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2126,11 +2118,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.20",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -2146,9 +2138,9 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2405,9 +2397,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.128"
+version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf"
+checksum = "9bb54f33acc68fd454578d9820b0bde1a1a3d17aa17bb7b6595806d02886d409"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -2418,9 +2410,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.128"
+version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a690d511e3c1a8b3a55e33511e3c2c00c78415cd23650f32b808627f5696b9ed"
+checksum = "2e29d0c35b16e224a7eeb5cd2d25e3e1968fbd65604117b44d3b789d00ee8535"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -2428,9 +2420,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.128"
+version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
+checksum = "6f501a8bc3719dba86ef8ae4728879c08001bea749eb1333ac5b91e040e2a6b7"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -2441,9 +2433,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.128"
+version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
+checksum = "23f0c9c52aa7cd7d77769a4cfe2a9adb1b331f489a41d912ce14513d5ab995c6"
 dependencies = [
  "unicode-ident",
 ]
@@ -2679,18 +2671,18 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
+checksum = "c17e8fafad82b542ff3717217ecdc736231b59e387768c9630123b4ce4d2db44"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.57"
+version = "0.8.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
+checksum = "595f56e044df4f46a0c9a626f65c3d99eb8488f7e8a8baa12dd76326d9710bf2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2699,9 +2691,9 @@ dependencies = [
 
 [[package]]
 name = "zhc"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89ebe4768c99e5a7ccca54a44f58ecf95910bfd414f80edfad25105666db12f0"
+checksum = "82a38609924d98d47c8a568588eb815a465a9493d84074ca2dd7b693d097feeb"
 dependencies = [
  "zhc_builder",
  "zhc_config",
@@ -2715,9 +2707,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_builder"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce84057f08492a82fe92a798e95f7f3297fb4e0f50a18db5cff42f3e7b7a2d11"
+checksum = "406d49ec6e756b9879a12014949212c07fc6f50f13a08605904dc490db52d7de"
 dependencies = [
  "zhc_crypto",
  "zhc_ir",
@@ -2727,9 +2719,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_config"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1271844e0becb778687b4b6f88f0f09252f353373ea208f1c6801709dff3486"
+checksum = "6348849b3b3fa15aa118b9cf467877eb81d3b821b980eaf9f70d1b9a14f46784"
 dependencies = [
  "serde",
  "serde_json",
@@ -2739,20 +2731,21 @@ dependencies = [
 
 [[package]]
 name = "zhc_crypto"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01140e4d118d98742827d722119368dbdda66d5a33ec3ecc8001c52d07bdc136"
+checksum = "e3c23948a31ed872a7918ad2a6b037a8617e293efdc8ca64399e002ab9e202cf"
 dependencies = [
  "paste",
  "rand 0.10.3",
+ "serde",
  "zhc_utils",
 ]
 
 [[package]]
 name = "zhc_ir"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf7f7337548923e51cb680582873e126a510649926bc27448b81df91b3186b81"
+checksum = "12c4a03c3603a344df90658a20b8a7f9b6dba5f697cd4946ba48b65b89ceca5a"
 dependencies = [
  "serde",
  "zhc_utils",
@@ -2761,21 +2754,33 @@ dependencies = [
 
 [[package]]
 name = "zhc_langs"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d5f88eb424e9a6d1b39b9e2287769f3eb74dc0de8db11befe38787c44edd99"
+checksum = "e44e07002c6561caf6fc05d41117c9dc82a9b54b24ee7e204515f2ae15139340"
 dependencies = [
  "serde",
  "zhc_crypto",
  "zhc_ir",
+ "zhc_langs_macro",
  "zhc_utils",
 ]
 
 [[package]]
-name = "zhc_pipeline"
-version = "0.10.0"
+name = "zhc_langs_macro"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d90028569c659d6fd928c5857f125e2de6184c166fa86f9e3070719fd20959d3"
+checksum = "357d0e0ef22fe942e97307c5177abe150e37810317bed5e06fbc7023b281cd0b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "zhc_pipeline"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56397422f1face648e3da39c0269a0891ff9d4c2df8f159153cc6f1f71d6b519"
 dependencies = [
  "bitfield-struct 0.10.1",
  "rand 0.10.3",
@@ -2791,15 +2796,15 @@ dependencies = [
 
 [[package]]
 name = "zhc_profiling"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77596dcb567a8a6bcf606cac14ab3d079d6c328dcd9f2c8bed7b36348c26bcd3"
+checksum = "7dd737074ec5b28829694f6b8096abae90cae6391dfb14ba0b9378f30866a076"
 
 [[package]]
 name = "zhc_sim"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca2f42554d73583fc3cf501eb0d67a3f10a19e8dbaf697497024c9ac0950f11d"
+checksum = "7b0145e63ddefb77a269f71bc9b733dcd456e35b6cce2f0b210ddee27dd47d34"
 dependencies = [
  "serde",
  "serde_json",
@@ -2811,9 +2816,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_utils"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfb214debc2e49d3be2c626aeb1ab7a59916978aeebfcfb9f841d6f1ae7f4fe2"
+checksum = "4473d2d0f56bd97ddcb7ad9fb71c46947aa7a34c6e093bdd91d8b7e4b048f67d"
 dependencies = [
  "libc",
  "paste",
@@ -2826,9 +2831,9 @@ dependencies = [
 
 [[package]]
 name = "zhc_utils_macro"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c055df1310a5dd2bc6293c82b143ab17187f36bee8f1db81d53d170c1dc3412b"
+checksum = "0f0283d7ed4090ff80fe8b47e4e363cf29c70fc894a047a3882749f6271e467f"
 dependencies = [
  "proc-macro2",
  "quote",
