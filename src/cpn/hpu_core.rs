@@ -299,7 +299,6 @@ impl HpuCore {
                                 dop.append_handler(types::Handler::custom(*self.props.uid(), cmd));
                                 // TODO move to dedicated trace_log file ?!
                                 // println!("@{}[{:?}]::{cmd}: {dop}", cur_tick(), self.props.clock_domain().from_tick(cur_tick()));
-
                                 // Append Hw trace data to deferred list
                                 let props = sim_model
                                     .scheduler
@@ -323,11 +322,9 @@ impl HpuCore {
                                         issue_lock: props.issue_lock as u8,
                                         sync_id: 0, // TODO add proper sync_id tracking
                                     },
-                                    // NB: DOp no longer has a standalone hex encoding (see the
-                                    // comment on the dop asm dump in `ucore.rs`), so only the
-                                    // asm view is available for tracing here.
                                     insn_hex: 0,
-                                    insn_asm: Some(dop.inner.to_string()),
+                                    insn_asm: dop.inner.to_string(),
+                                    insn: Some(dop.inner.clone()),
                                     timestamp: usize::from(
                                         self.props.clock_domain().from_tick(cur_tick()),
                                     ) as u32,
