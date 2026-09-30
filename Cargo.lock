@@ -580,7 +580,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1066,7 +1066,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1656,7 +1656,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1951,7 +1951,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1979,7 +1979,7 @@ dependencies = [
 [[package]]
 name = "tfhe"
 version = "1.8.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "aligned-vec",
  "bincode",
@@ -2005,7 +2005,7 @@ dependencies = [
 [[package]]
 name = "tfhe-csprng"
 version = "0.10.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "aes",
  "getrandom 0.2.17",
@@ -2018,7 +2018,7 @@ dependencies = [
 [[package]]
 name = "tfhe-fft"
 version = "0.10.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2032,7 +2032,7 @@ dependencies = [
 [[package]]
 name = "tfhe-hpu-backend"
 version = "0.7.0"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2069,7 +2069,7 @@ dependencies = [
 [[package]]
 name = "tfhe-ntt"
 version = "0.7.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "aligned-vec",
  "bytemuck",
@@ -2079,7 +2079,7 @@ dependencies = [
 [[package]]
 name = "tfhe-safe-serialize"
 version = "0.1.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "bincode",
  "serde",
@@ -2089,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "tfhe-versionable"
 version = "0.8.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "aligned-vec",
  "num-complex",
@@ -2100,7 +2100,7 @@ dependencies = [
 [[package]]
 name = "tfhe-versionable-derive"
 version = "0.8.1"
-source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Fdyn_iop#61fcf57af32b3918d99663e91fc76073f17e2281"
+source = "git+https://github.com/zama-ai/tfhe-rs.git?branch=br%2Ffw_fix#ff86ec089d0528bd8b1a5d4b75eb4b66fbf96657"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2446,7 +2446,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

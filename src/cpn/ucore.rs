@@ -206,7 +206,7 @@ impl DstArgStore {
     /// Init iop state
     /// Based on IOp properties discard unused slot
     fn init_iop(&mut self, iop: &hpu_asm::IOp) {
-        let iid = iop.get_iid();
+        let iid = iop.iid();
         for (idx, var) in iop.dst().iter().enumerate() {
             let var_idx = Self::var_index_from_tuple(iid, idx as u8);
             self.owner[var_idx] = var.props.pos;
@@ -806,15 +806,32 @@ impl UCore {
 
     async fn hpu_feed(self: Arc<Self>) {
         loop {
+            // Nothing pending in the stream, poll again later
+            if self.inner.lock().unwrap().iop_stream.is_empty() {
+                delay::Delay::wait_for(self.params.polling_rate.into()).await;
+                continue;
+            }
+
+            // NB: Config carries our node id, which is required to extract the Iop. Indeed Hpu
+            //     outside of the mapping only received its preamble.
+            let has_restart = self.load_config().await;
+            let hid = hpu_asm::PhysId(
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .config
+                    .get()
+                    .expect("UcoreConfig must be init first")
+                    .node_id,
+            );
+
             // Extract one Iop from stream
             let iop_pdg = {
                 let iop_stream = &mut self.inner.lock().unwrap().iop_stream;
-                hpu_asm::IOp::from_words(iop_stream).ok()
+                hpu_asm::IOp::from_words_as(hid, iop_stream).ok()
             };
 
             if let Some(iop) = iop_pdg {
-                let has_restart = self.load_config().await;
-
                 log!(|self| log::Category::Own, log::Verbosity::Debug => iop => "Will process following iop");
 
                 // Update ucore state and extract vid if any
@@ -840,7 +857,7 @@ impl UCore {
                     inner.local_store.reset(iop.clone());
                     inner.dst_store.init_iop(&iop);
 
-                    inner.cur_iid = iop.get_iid();
+                    inner.cur_iid = iop.iid();
                     let vid = inner.get_vid(&iop);
                     if vid.is_some() {
                         inner.dst_notifyq.push_back(Vec::new());
@@ -933,7 +950,7 @@ impl UCore {
                         .front()
                         .expect("Received IOp Ack without IOp pending");
 
-                    (hid, iop.get_iid(), iop.mapping().len() as u8)
+                    (hid, iop.iid(), iop.mapping().len() as u8)
                 };
 
                 // Start iop teardown
@@ -1401,7 +1418,7 @@ impl UCore {
         iop: &hpu_asm::IOp,
         dops: &[DopInstructionSet],
     ) -> Result<(), anyhow::Error> {
-        let iop_id = iop.get_iid();
+        let iop_id = iop.iid();
 
         // Read node if from config
         let hid = {
@@ -1437,7 +1454,7 @@ impl UCore {
                         mode: UcorePayloadMode::User(*flag),
                         slot: Some(raw_cid),
                         from_hid,
-                        iid: iop.get_iid(),
+                        iid: iop.iid(),
                     };
 
                     log!(|self| log::Category::Own, log::Verbosity::Trace => ucore_pld => "Register B2b Notify for later execution");
@@ -1449,13 +1466,13 @@ impl UCore {
                         is_inner: true,
                         flag: *flag,
                         hid: *virt_id,
-                        iid: iop.get_iid().0,
+                        iid: iop.iid().0,
                     };
                     Some(inner_sync)
                 }
                 DopInstructionSet::WAIT { flag, slot } => {
                     let var_mode = VarMode::User {
-                        iid: iop.get_iid(),
+                        iid: iop.iid(),
                         flag: *flag,
                     };
                     // Check if data is associated with Wait
@@ -1476,7 +1493,7 @@ impl UCore {
                     //1. Construct mode
                     let raw_cid = self.ctmem_to_cid(*slot);
                     let var_mode = VarMode::User {
-                        iid: iop.get_iid(),
+                        iid: iop.iid(),
                         flag: *flag,
                     };
 
@@ -1600,7 +1617,7 @@ impl UCore {
                     // Register in DstNotifyQ for later notify
                     // TODO Check that not already present or enforce single access by compiler rules ?!
                     // Allocate temporary value in the B2B_pool
-                    let local_cid = inner.b2b_pool.get_tagged(iop.get_iid());
+                    let local_cid = inner.b2b_pool.get_tagged(iop.iid());
 
                     // Create associated entry.
                     // NB: only occurred for remote access case (i.e. no direct deletion afterward)
@@ -2164,7 +2181,7 @@ impl UCore {
 
         // Dump iop in file
         let iop = &pld.inner;
-        let iid = iop.get_iid();
+        let iid = iop.iid();
 
         let asm_p = format!("{}/iop/iop_{}.asm", trace_path.to_str().unwrap(), iid);
         let hex_p = format!("{}/iop/iop_{}.hex", trace_path.to_str().unwrap(), iid);
